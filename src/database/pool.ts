@@ -8,7 +8,7 @@ import { URL } from "node:url"
 
 import pg from "pg"
 
-import { AppError } from "../core/errors.js"
+import { AppError } from "../core/index.js"
 
 export interface PoolConfig {
   /** PostgreSQL connection URL. The password is redacted in error text. */
@@ -72,11 +72,7 @@ class BoundedPool implements Pool {
       max: maxConnections,
       connectionTimeoutMillis: acquireTimeoutMs,
       query_timeout: queryTimeoutMs,
-      // Keep a small reserve of idle connections so the first request after
-      // a quiet period does not pay the TCP+SSL+auth handshake cost.
       idleTimeoutMillis: 30_000,
-      // Allow the pool to fail fast if the database is not reachable. The
-      // process should surface a startup error, not hang forever.
       allowExitOnIdle: false,
     })
 
@@ -85,7 +81,8 @@ class BoundedPool implements Pool {
         JSON.stringify({
           level: "error",
           msg: "Unexpected PostgreSQL pool error",
-          error: poolErrorMessage(error),
+          type: error instanceof Error ? error.constructor.name : typeof error,
+          databaseUrl: this.databaseUrlForErrors,
         }),
       )
     })
@@ -99,7 +96,9 @@ class BoundedPool implements Pool {
     try {
       return await this.pool.query<R>(text, values)
     } catch (error: unknown) {
-      throw translatePoolError(error, this.databaseUrlForErrors)
+      throw translatePoolError(error, {
+        databaseUrlForErrors: this.databaseUrlForErrors,
+      })
     }
   }
 
@@ -109,7 +108,9 @@ class BoundedPool implements Pool {
       const client = await this.pool.connect()
       return client
     } catch (error: unknown) {
-      throw translatePoolError(error, this.databaseUrlForErrors)
+      throw translatePoolError(error, {
+        databaseUrlForErrors: this.databaseUrlForErrors,
+      })
     }
   }
 
@@ -171,54 +172,136 @@ function redactUrlPassword(url: string): string {
   }
 }
 
-function poolErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message
+export interface PoolErrorContext {
+  /** A redacted, log-safe database URL (password hidden) used only for diagnostics. */
+  databaseUrlForErrors: string
+}
+
+// PostgreSQL SQLSTATE codes and Node network errors that mean the database is
+// unreachable or unavailable. These must never leak into public messages.
+const DATABASE_UNAVAILABLE_CODES: readonly string[] = [
+  // Class 08 — connection exceptions.
+  "08000",
+  "08003",
+  "08006",
+  "08001",
+  "08004",
+  "08007",
+  "08P01",
+  // Insufficient resources / cannot connect now / too many connections.
+  "53300",
+  "57000",
+  "57014",
+  // Operator intervention / crash / recovery.
+  "57P01",
+  "57P02",
+  "57P03",
+  // Authentication failure.
+  "28P01",
+  "28000",
+]
+
+const DATABASE_UNAVAILABLE_NODE_CODES: readonly string[] = [
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EPIPE",
+]
+
+function isDatabaseUnavailableError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false
   }
-  return String(error)
+
+  const candidate = error as Record<string, unknown>
+
+  const code = candidate["code"]
+  if (typeof code === "string") {
+    if (DATABASE_UNAVAILABLE_CODES.includes(code)) {
+      return true
+    }
+    if (DATABASE_UNAVAILABLE_NODE_CODES.includes(code)) {
+      return true
+    }
+  }
+
+  const sqlState = candidate["sqlState"]
+  if (typeof sqlState === "string" && sqlState.startsWith("08")) {
+    return true
+  }
+
+  const message = error instanceof Error ? error.message : String(error)
+  const lower = message.toLowerCase()
+  if (
+    DATABASE_UNAVAILABLE_NODE_CODES.some((code) =>
+      message.toUpperCase().includes(code),
+    )
+  ) {
+    return true
+  }
+  if (
+    lower.includes("password authentication failed") ||
+    lower.includes("authentication failed")
+  ) {
+    return true
+  }
+  if (lower.includes("connect") && lower.includes("refused")) {
+    return true
+  }
+  if (lower.includes("connection terminated")) {
+    return true
+  }
+  if (lower.includes("timeout") && lower.includes("database")) {
+    return true
+  }
+
+  return false
 }
 
 export function translatePoolError(
   error: unknown,
-  databaseUrlForErrors: string,
+  // Context is retained for future diagnostics but must never be included in
+  // public error messages returned by this function.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _context: string | PoolErrorContext,
 ): AppError {
   if (error instanceof AppError) {
     return error
   }
 
-  const message = error instanceof Error ? error.message : String(error)
+  if (isDatabaseUnavailableError(error)) {
+    const message = error instanceof Error ? error.message : String(error)
+    const lower = message.toLowerCase()
 
-  // Class 08 — connection errors.
-  if (message.startsWith("connect ECONNREFUSED")) {
-    return new AppError(
-      "DATABASE_UNAVAILABLE",
-      `Could not connect to database at ${databaseUrlForErrors}`,
-      503,
-    )
-  }
+    if (lower.includes("password authentication failed")) {
+      return new AppError(
+        "DATABASE_UNAVAILABLE",
+        "Database authentication failed",
+        503,
+      )
+    }
 
-  if (message.startsWith("Connection terminated")) {
-    return new AppError(
-      "DATABASE_UNAVAILABLE",
-      "Database connection was terminated unexpectedly",
-      503,
-    )
-  }
+    if (lower.includes("timeout")) {
+      return new AppError(
+        "DATABASE_UNAVAILABLE",
+        "Database operation timed out",
+        503,
+      )
+    }
 
-  if (message.includes("timeout")) {
-    return new AppError(
-      "DATABASE_UNAVAILABLE",
-      "Database operation timed out",
-      503,
-    )
-  }
+    if (lower.includes("connection terminated")) {
+      return new AppError(
+        "DATABASE_UNAVAILABLE",
+        "Database connection was terminated unexpectedly",
+        503,
+      )
+    }
 
-  if (message.includes("password authentication failed")) {
-    return new AppError(
-      "DATABASE_UNAVAILABLE",
-      "Database authentication failed",
-      503,
-    )
+    return new AppError("DATABASE_UNAVAILABLE", "Database is unavailable", 503)
   }
 
   return new AppError(

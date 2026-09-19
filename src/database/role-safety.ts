@@ -6,7 +6,7 @@
 
 import type pg from "pg"
 
-import { AppError } from "../core/errors.js"
+import { AppError } from "../core/index.js"
 
 export interface RoleSafetyResult {
   role: string
@@ -83,6 +83,28 @@ export async function checkRuntimeRoleSafety(
   }
 }
 
+export interface TablePrivilegeCheck {
+  schema: string
+  table: string
+  hasSelect: boolean
+  hasInsert: boolean
+  hasUpdate: boolean
+  hasDelete: boolean
+}
+
+export interface PolicyCheck {
+  schema: string
+  table: string
+  policyName: string
+  applicableRoles: readonly string[]
+}
+
+export interface RuntimeTableSafety {
+  ownership: TableOwnershipCheck
+  privileges: TablePrivilegeCheck
+  policies: readonly PolicyCheck[]
+}
+
 export async function checkTableOwnershipAndRls(
   client: pg.Client | pg.PoolClient,
   tables: readonly { schema: string; table: string }[],
@@ -118,8 +140,6 @@ export async function checkTableOwnershipAndRls(
 
     const row = result.rows[0]
     if (row === undefined) {
-      // Defensive: we already verified the table exists above, but TypeScript
-      // cannot know the query returned a row without a runtime check.
       throw new AppError(
         "DATABASE_UNAVAILABLE",
         `Configured table ${schema}.${table} does not exist`,
@@ -136,21 +156,19 @@ export async function checkTableOwnershipAndRls(
       hasForceRls: row.relforcerowsecurity,
     }
 
-    const isOwnedByRuntimeRole = row.relowner === (await currentRole(client))
-
-    if (isOwnedByRuntimeRole && !row.relforcerowsecurity) {
+    if (!row.relrowsecurity) {
       throw new AppError(
         "DATABASE_UNAVAILABLE",
-        `Runtime role owns ${schema}.${table} but forced row-level security is not enabled`,
+        `Row-level security is not enabled on ${schema}.${table}`,
         503,
         { schema, table },
       )
     }
 
-    if (!row.relrowsecurity) {
+    if (!row.relforcerowsecurity) {
       throw new AppError(
         "DATABASE_UNAVAILABLE",
-        `Row-level security is not enabled on ${schema}.${table}`,
+        `Forced row-level security is not enabled on ${schema}.${table}`,
         503,
         { schema, table },
       )
@@ -162,17 +180,82 @@ export async function checkTableOwnershipAndRls(
   return checks
 }
 
-async function currentRole(client: pg.Client | pg.PoolClient): Promise<string> {
-  const result = await client.query<{ current_user: string }>(
-    "SELECT current_user",
-  )
-  const row = result.rows[0]
-  if (row === undefined) {
-    throw new AppError(
-      "DATABASE_UNAVAILABLE",
-      "Could not determine current database role",
-      503,
+export async function checkRuntimeTablePrivileges(
+  client: pg.Client | pg.PoolClient,
+  tables: readonly { schema: string; table: string }[],
+): Promise<readonly TablePrivilegeCheck[]> {
+  const checks: TablePrivilegeCheck[] = []
+
+  for (const { schema, table } of tables) {
+    const result = await client.query<{
+      privilege_type: string
+    }>(
+      `
+        SELECT privilege_type
+        FROM information_schema.table_privileges
+        WHERE table_schema = $1 AND table_name = $2
+          AND grantee = current_user
+      `,
+      [schema, table],
     )
+
+    const privileges = new Set(result.rows.map((r) => r.privilege_type))
+    checks.push({
+      schema,
+      table,
+      hasSelect: privileges.has("SELECT"),
+      hasInsert: privileges.has("INSERT"),
+      hasUpdate: privileges.has("UPDATE"),
+      hasDelete: privileges.has("DELETE"),
+    })
   }
-  return row.current_user
+
+  return checks
+}
+
+export async function checkApplicablePolicies(
+  client: pg.Client | pg.PoolClient,
+  tables: readonly { schema: string; table: string }[],
+): Promise<readonly PolicyCheck[]> {
+  const checks: PolicyCheck[] = []
+
+  for (const { schema, table } of tables) {
+    const result = await client.query<{
+      policyname: string
+      roles: string[]
+    }>(
+      `
+        SELECT pol.polname AS policyname,
+               ARRAY(
+                 SELECT pg_get_userbyid(role_member)
+                 FROM unnest(pol.polroles) AS role_member
+               ) AS roles
+        FROM pg_policy pol
+        JOIN pg_class c ON c.oid = pol.polrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND c.relname = $2
+      `,
+      [schema, table],
+    )
+
+    if (result.rows.length === 0) {
+      throw new AppError(
+        "DATABASE_UNAVAILABLE",
+        `No row-level security policies exist for ${schema}.${table}`,
+        503,
+        { schema, table },
+      )
+    }
+
+    for (const row of result.rows) {
+      checks.push({
+        schema,
+        table,
+        policyName: row.policyname,
+        applicableRoles: row.roles,
+      })
+    }
+  }
+
+  return checks
 }

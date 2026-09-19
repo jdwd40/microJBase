@@ -2,15 +2,29 @@ import { describe, expect, it, beforeAll, afterAll } from "vitest"
 import pg from "pg"
 
 import { createPool, type Pool } from "../../../src/database/pool.js"
+import { applyMigrationsAndGrants } from "./bootstrap.js"
 
-const databaseUrl =
-  process.env.INTEGRATION_DATABASE_URL ??
-  "postgres://microjbase_runtime:microjbase_runtime_password@127.0.0.1:5432/microjbase_dev"
+const databaseUrl = process.env.INTEGRATION_DATABASE_URL
+if (!databaseUrl) {
+  throw new Error(
+    "INTEGRATION_DATABASE_URL environment variable is required for integration tests",
+  )
+}
+
+const adminDatabaseUrl = process.env.INTEGRATION_ADMIN_DATABASE_URL
+if (!adminDatabaseUrl) {
+  throw new Error(
+    "INTEGRATION_ADMIN_DATABASE_URL environment variable is required for pool tests",
+  )
+}
+
+const RUNTIME_ROLE_NAME = "microjbase_runtime"
 
 describe("database pool", () => {
   let pool: Pool
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    await applyMigrationsAndGrants(adminDatabaseUrl, RUNTIME_ROLE_NAME)
     pool = createPool({ databaseUrl, maxConnections: 2 })
   })
 
@@ -56,7 +70,7 @@ describe("database pool", () => {
 
   it("surfaces connection errors as DATABASE_UNAVAILABLE", async () => {
     const badPool = createPool({
-      databaseUrl: "postgres://microjbase:wrong@127.0.0.1:5432/microjbase_dev",
+      databaseUrl: "postgres://microjbase:***@127.0.0.1:1/microjbase_dev",
       maxConnections: 1,
     })
     await expect(badPool.query("SELECT 1")).rejects.toMatchObject({
@@ -69,14 +83,11 @@ describe("database pool", () => {
     const localPool = createPool({ databaseUrl, maxConnections: 1 })
     const holder = await localPool.connect()
 
-    // With a single-connection pool, a second concurrent connect must wait
-    // (or time out). We expect it to still be pending when we inspect.
     let secondClient: pg.PoolClient | undefined
     const pending = localPool.connect().then((c) => {
       secondClient = c
     })
 
-    // Give the pool a tick to enqueue the request.
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(secondClient).toBeUndefined()
 
@@ -84,5 +95,47 @@ describe("database pool", () => {
     await pending
     secondClient?.release()
     await localPool.close()
+  })
+
+  it("does not include database URL topology in public connection errors", async () => {
+    const badPool = createPool({
+      databaseUrl: "postgres://runtime_user:***@127.0.0.1:1/production_db",
+      maxConnections: 1,
+    })
+    try {
+      await badPool.query("SELECT 1")
+    } catch (error: unknown) {
+      expect(error).toMatchObject({
+        code: "DATABASE_UNAVAILABLE",
+        message: "Database is unavailable",
+      })
+      const text = JSON.stringify(error)
+      expect(text).not.toContain("127.0.0.1")
+      expect(text).not.toContain("runtime_user")
+      expect(text).not.toContain("production_db")
+    }
+    await badPool.close()
+  })
+
+  it("does not include raw error messages in pool error logs", async () => {
+    const logs: string[] = []
+    const logger = {
+      error: (msg: string) => logs.push(msg),
+      warn: () => {},
+      info: () => {},
+      debug: () => {},
+    }
+    const badPool = createPool({
+      databaseUrl: "postgres://runtime_user:***@127.0.0.1:1/dbname",
+      maxConnections: 1,
+      logger,
+    })
+    await expect(badPool.query("SELECT 1")).rejects.toBeDefined()
+
+    for (const log of logs) {
+      expect(log).not.toContain("runtime_user")
+      expect(log).not.toMatch(/password authentication failed|ECONNREFUSED/)
+    }
+    await badPool.close()
   })
 })

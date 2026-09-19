@@ -6,16 +6,30 @@ import {
   type Pool,
   type TransactionRunner,
 } from "../../../src/database/index.js"
+import { applyMigrationsAndGrants } from "./bootstrap.js"
 
-const databaseUrl =
-  process.env.INTEGRATION_DATABASE_URL ??
-  "postgres://microjbase_runtime:microjbase_runtime_password@127.0.0.1:5432/microjbase_dev"
+const databaseUrl = process.env.INTEGRATION_DATABASE_URL
+if (!databaseUrl) {
+  throw new Error(
+    "INTEGRATION_DATABASE_URL environment variable is required for integration tests",
+  )
+}
+
+const adminDatabaseUrl = process.env.INTEGRATION_ADMIN_DATABASE_URL
+if (!adminDatabaseUrl) {
+  throw new Error(
+    "INTEGRATION_ADMIN_DATABASE_URL environment variable is required for transaction tests",
+  )
+}
+
+const RUNTIME_ROLE_NAME = "microjbase_runtime"
 
 describe("transaction helper", () => {
   let pool: Pool
   let runner: TransactionRunner
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    await applyMigrationsAndGrants(adminDatabaseUrl, RUNTIME_ROLE_NAME)
     pool = createPool({ databaseUrl, maxConnections: 1 })
     runner = createTransactionRunner(() => pool.connect())
   })
@@ -66,7 +80,6 @@ describe("transaction helper", () => {
   it("does not leak identity to the next borrower of the same connection", async () => {
     const userId = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
 
-    // Single-connection pool guarantees the next checkout is the same backend.
     await runner.withTransaction(
       async () => {
         // identity set here

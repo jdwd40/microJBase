@@ -9,6 +9,24 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: microjbase
+          POSTGRES_PASSWORD: microjbase_dev_password
+          POSTGRES_DB: microjbase_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      MIGRATION_DATABASE_URL: postgres://microjbase:microjbase_dev_password@localhost:5432/microjbase_migration_test
+      INTEGRATION_ADMIN_DATABASE_URL: postgres://microjbase:microjbase_dev_password@localhost:5432/microjbase_integration_test
+      INTEGRATION_DATABASE_URL: postgres://microjbase_runtime:microjbase_runtime_password@localhost:5432/microjbase_integration_test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,8 +37,37 @@ jobs:
           node-version: 22.13.0
           cache: npm
 
+      - name: Bootstrap databases and roles
+        run: |
+          PGPASSWORD=microjbase_dev_password psql -h localhost -U microjbase -d microjbase_dev -c "
+            DROP DATABASE IF EXISTS microjbase_migration_test;
+            DROP DATABASE IF EXISTS microjbase_integration_test;
+            CREATE DATABASE microjbase_migration_test;
+            CREATE DATABASE microjbase_integration_test;
+          "
+          PGPASSWORD=microjbase_dev_password psql -h localhost -U microjbase -d microjbase_dev -c "
+            DROP ROLE IF EXISTS microjbase_runtime;
+            CREATE ROLE microjbase_runtime WITH LOGIN PASSWORD 'microjbase_runtime_password' NOSUPERUSER NOBYPASSRLS;
+          "
+          npm ci
+          MIGRATION_DATABASE_URL="$MIGRATION_DATABASE_URL" npm run migrate
+          MIGRATION_DATABASE_URL="$INTEGRATION_ADMIN_DATABASE_URL" npm run migrate
+          PGPASSWORD=microjbase_dev_password psql -h localhost -U microjbase -d microjbase_integration_test -c "
+            GRANT USAGE ON SCHEMA microjbase TO microjbase_runtime;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA microjbase TO microjbase_runtime;
+            GRANT SELECT ON ALL SEQUENCES IN SCHEMA microjbase TO microjbase_runtime;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA microjbase
+              GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO microjbase_runtime;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA microjbase
+              GRANT SELECT ON SEQUENCES TO microjbase_runtime;
+            GRANT CREATE ON SCHEMA public TO microjbase_runtime;
+          "
+
       - name: Install dependencies
         run: npm ci
+
+      - name: Format check
+        run: npm run format:check
 
       - name: Typecheck
         run: npm run typecheck

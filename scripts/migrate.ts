@@ -160,19 +160,22 @@ function sha256Checksum(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex")
 }
 
-async function main(): Promise<void> {
-  const databaseUrl =
-    process.env.MIGRATION_DATABASE_URL ?? process.env.DATABASE_URL
+function requireMigrationDatabaseUrl(): string {
+  const databaseUrl = process.env.MIGRATION_DATABASE_URL
   if (!databaseUrl) {
-    throw new Error(
-      "MIGRATION_DATABASE_URL or DATABASE_URL environment variable is required",
-    )
+    throw new Error("MIGRATION_DATABASE_URL environment variable is required")
   }
-
-  await migrate({ databaseUrl })
+  return databaseUrl
 }
 
-main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : String(error))
-  process.exitCode = 1
-})
+async function main(): Promise<void> {
+  await migrate({ databaseUrl: requireMigrationDatabaseUrl() })
+}
+
+// Only run when this module is the process entry point, never when imported.
+if (import.meta.url === new URL(process.argv[1] ?? "", "file:").href) {
+  main().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exitCode = 1
+  })
+}

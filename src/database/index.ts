@@ -8,6 +8,7 @@ export {
   translatePoolError,
   type Pool,
   type PoolConfig,
+  type PoolErrorContext,
 } from "./pool.js"
 export {
   createTransactionRunner,
@@ -19,6 +20,11 @@ export {
 export {
   checkRuntimeRoleSafety,
   checkTableOwnershipAndRls,
+  checkRuntimeTablePrivileges,
+  checkApplicablePolicies,
   type RuntimeRoleSafety,
   type TableOwnershipCheck,
+  type TablePrivilegeCheck,
+  type PolicyCheck,
+  type RuntimeTableSafety,
 } from "./role-safety.js"

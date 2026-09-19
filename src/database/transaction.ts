@@ -8,7 +8,7 @@
 
 import type pg from "pg"
 
-import { AppError } from "../core/errors.js"
+import { AppError } from "../core/index.js"
 import type { UserId } from "../contracts/auth.js"
 
 export interface TransactionContext {
@@ -41,12 +41,7 @@ class PooledTransactionRunner implements TransactionRunner {
     const client = await this.connect()
 
     const release = (err?: Error | boolean): void => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const nativeRelease = (client as any).release as
-        ((err?: Error | boolean) => void) | undefined
-      if (typeof nativeRelease === "function") {
-        nativeRelease(err)
-      }
+      client.release(err)
     }
 
     try {
