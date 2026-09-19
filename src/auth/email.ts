@@ -16,6 +16,9 @@ const ASCII_WHITESPACE_TRIM = /^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g
  */
 const PRAGMATIC_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u
 
+/** Unicode general category Cc (C0, DEL, and C1 controls). */
+const UNICODE_CONTROL = /\p{Cc}/u
+
 export function normaliseEmail(raw: string): string {
   const trimmed = raw.replace(ASCII_WHITESPACE_TRIM, "")
   const nfc = trimmed.normalize("NFC")
@@ -24,6 +27,7 @@ export function normaliseEmail(raw: string): string {
   if (
     email.length === 0 ||
     Buffer.byteLength(email, "utf8") > MAX_EMAIL_UTF8_BYTES ||
+    UNICODE_CONTROL.test(email) ||
     !PRAGMATIC_EMAIL.test(email)
   ) {
     throw new AuthError("VALIDATION_ERROR", "Request validation failed", 400, {

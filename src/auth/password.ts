@@ -26,28 +26,23 @@ const HASH_OPTIONS = {
   parallelism: ARGON2_PARALLELISM,
 } as const
 
-function hasForbiddenControlChars(password: string): boolean {
-  for (let i = 0; i < password.length; i += 1) {
-    const code = password.charCodeAt(i)
-    // NUL, C0 controls, and DEL
-    if (code <= 0x1f || code === 0x7f) {
-      return true
-    }
-  }
-  return false
+/** Unicode general category Cc (C0, DEL, and C1 controls). */
+const UNICODE_CONTROL = /\p{Cc}/u
+
+function passwordCodePointLength(password: string): number {
+  return Array.from(password).length
 }
 
 export function validatePassword(password: string): void {
-  if (
-    password.length < MIN_PASSWORD_LENGTH ||
-    password.length > MAX_PASSWORD_LENGTH
-  ) {
+  const length = passwordCodePointLength(password)
+
+  if (length < MIN_PASSWORD_LENGTH || length > MAX_PASSWORD_LENGTH) {
     throw new AuthError("VALIDATION_ERROR", "Request validation failed", 400, {
       password: `Must be between ${MIN_PASSWORD_LENGTH} and ${MAX_PASSWORD_LENGTH} characters`,
     })
   }
 
-  if (hasForbiddenControlChars(password)) {
+  if (UNICODE_CONTROL.test(password)) {
     throw new AuthError("VALIDATION_ERROR", "Request validation failed", 400, {
       password: "Must not contain control characters",
     })

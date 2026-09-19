@@ -43,6 +43,15 @@ describe("normaliseEmail", () => {
     }
   })
 
+  it("rejects control characters in the local or domain part", () => {
+    // NUL and ESC previously matched [^\s@]+
+    expect(() => normaliseEmail("a\u0000@b.co")).toThrow(AuthError)
+    expect(() => normaliseEmail("a\u001b@b.co")).toThrow(AuthError)
+    // C1 control
+    expect(() => normaliseEmail("a\u0085@b.co")).toThrow(AuthError)
+    expect(() => normaliseEmail("alice@ex\u007fample.com")).toThrow(AuthError)
+  })
+
   it("rejects addresses longer than 254 UTF-8 bytes", () => {
     const local = "a".repeat(250)
     const email = `${local}@example.com` // > 254 bytes
