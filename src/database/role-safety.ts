@@ -75,11 +75,90 @@ export async function checkRuntimeRoleSafety(
     )
   }
 
+  await assertRequiredPrivileges(client)
+
   return {
     role: role.rolname,
     isSuperuser: role.rolsuper,
     hasBypassRls: role.rolbypassrls,
     tables: [],
+  }
+}
+
+interface RequiredPrivilege {
+  kind: "schema" | "table"
+  schema: string
+  table?: string
+  privilege: string
+}
+
+const REQUIRED_PRIVILEGES: readonly RequiredPrivilege[] = [
+  { kind: "schema", schema: "microjbase", privilege: "USAGE" },
+  {
+    kind: "table",
+    schema: "microjbase",
+    table: "schema_migrations",
+    privilege: "SELECT",
+  },
+  { kind: "table", schema: "microjbase", table: "users", privilege: "SELECT" },
+  { kind: "table", schema: "microjbase", table: "users", privilege: "INSERT" },
+  {
+    kind: "table",
+    schema: "microjbase",
+    table: "sessions",
+    privilege: "SELECT",
+  },
+  {
+    kind: "table",
+    schema: "microjbase",
+    table: "sessions",
+    privilege: "INSERT",
+  },
+  {
+    kind: "table",
+    schema: "microjbase",
+    table: "sessions",
+    privilege: "UPDATE",
+  },
+]
+
+async function assertRequiredPrivileges(
+  client: pg.Client | pg.PoolClient,
+): Promise<void> {
+  for (const required of REQUIRED_PRIVILEGES) {
+    if (required.kind === "schema") {
+      const result = await client.query<{ has: boolean }>(
+        "SELECT has_schema_privilege(current_user, $1, $2) AS has",
+        [required.schema, required.privilege],
+      )
+      const row = result.rows[0]
+      if (row === undefined || !row.has) {
+        throw new AppError(
+          "DATABASE_UNAVAILABLE",
+          `Runtime role is missing required privilege ${required.privilege} on schema ${required.schema}`,
+          503,
+          { schema: required.schema, privilege: required.privilege },
+        )
+      }
+    } else {
+      const result = await client.query<{ has: boolean }>(
+        "SELECT has_table_privilege(current_user, $1, $2) AS has",
+        [`${required.schema}.${required.table}`, required.privilege],
+      )
+      const row = result.rows[0]
+      if (row === undefined || !row.has) {
+        throw new AppError(
+          "DATABASE_UNAVAILABLE",
+          `Runtime role is missing required privilege ${required.privilege} on ${required.schema}.${required.table}`,
+          503,
+          {
+            schema: required.schema,
+            table: required.table,
+            privilege: required.privilege,
+          },
+        )
+      }
+    }
   }
 }
 
@@ -188,25 +267,38 @@ export async function checkRuntimeTablePrivileges(
 
   for (const { schema, table } of tables) {
     const result = await client.query<{
-      privilege_type: string
+      has_select: boolean
+      has_insert: boolean
+      has_update: boolean
+      has_delete: boolean
     }>(
       `
-        SELECT privilege_type
-        FROM information_schema.table_privileges
-        WHERE table_schema = $1 AND table_name = $2
-          AND grantee = current_user
+        SELECT
+          has_table_privilege(current_user, $1, 'SELECT') AS has_select,
+          has_table_privilege(current_user, $1, 'INSERT') AS has_insert,
+          has_table_privilege(current_user, $1, 'UPDATE') AS has_update,
+          has_table_privilege(current_user, $1, 'DELETE') AS has_delete
       `,
-      [schema, table],
+      [`${schema}.${table}`],
     )
 
-    const privileges = new Set(result.rows.map((r) => r.privilege_type))
+    const row = result.rows[0]
+    if (row === undefined) {
+      throw new AppError(
+        "DATABASE_UNAVAILABLE",
+        `Could not determine privileges on ${schema}.${table}`,
+        503,
+        { schema, table },
+      )
+    }
+
     checks.push({
       schema,
       table,
-      hasSelect: privileges.has("SELECT"),
-      hasInsert: privileges.has("INSERT"),
-      hasUpdate: privileges.has("UPDATE"),
-      hasDelete: privileges.has("DELETE"),
+      hasSelect: row.has_select,
+      hasInsert: row.has_insert,
+      hasUpdate: row.has_update,
+      hasDelete: row.has_delete,
     })
   }
 
@@ -223,13 +315,21 @@ export async function checkApplicablePolicies(
     const result = await client.query<{
       policyname: string
       roles: string[]
+      applicable_to_current_user: boolean
     }>(
       `
         SELECT pol.polname AS policyname,
                ARRAY(
                  SELECT pg_get_userbyid(role_member)
                  FROM unnest(pol.polroles) AS role_member
-               ) AS roles
+               ) AS roles,
+               (
+                 pol.polroles = ARRAY[0]::oid[]
+                 OR EXISTS (
+                   SELECT 1 FROM unnest(pol.polroles) AS policy_role
+                   WHERE pg_has_role(current_user, policy_role, 'MEMBER')
+                 )
+               ) AS applicable_to_current_user
         FROM pg_policy pol
         JOIN pg_class c ON c.oid = pol.polrelid
         JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -242,6 +342,18 @@ export async function checkApplicablePolicies(
       throw new AppError(
         "DATABASE_UNAVAILABLE",
         `No row-level security policies exist for ${schema}.${table}`,
+        503,
+        { schema, table },
+      )
+    }
+
+    const anyApplicable = result.rows.some(
+      (row) => row.applicable_to_current_user,
+    )
+    if (!anyApplicable) {
+      throw new AppError(
+        "DATABASE_UNAVAILABLE",
+        `No row-level security policies on ${schema}.${table} apply to the runtime role`,
         503,
         { schema, table },
       )

@@ -18,24 +18,6 @@ export async function withClient<T>(
   }
 }
 
-export async function ensureRuntimeRole(
-  adminUrl: string,
-  roleName: string,
-  password: string,
-): Promise<void> {
-  await withClient(adminUrl, async (client) => {
-    await client.query(
-      `DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${roleName}') THEN
-          CREATE ROLE ${roleName} WITH LOGIN PASSWORD '${password}' NOSUPERUSER NOBYPASSRLS;
-        END IF;
-      END
-      $$;`,
-    )
-  })
-}
-
 export async function applyMigrationsAndGrants(
   adminUrl: string,
   runtimeRoleName: string,
@@ -46,13 +28,9 @@ export async function applyMigrationsAndGrants(
   await withClient(adminUrl, async (client) => {
     await client.query(`
       GRANT USAGE ON SCHEMA microjbase TO ${runtimeRoleName};
-      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA microjbase TO ${runtimeRoleName};
-      GRANT SELECT ON ALL SEQUENCES IN SCHEMA microjbase TO ${runtimeRoleName};
-      ALTER DEFAULT PRIVILEGES IN SCHEMA microjbase
-        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${runtimeRoleName};
-      ALTER DEFAULT PRIVILEGES IN SCHEMA microjbase
-        GRANT SELECT ON SEQUENCES TO ${runtimeRoleName};
-      GRANT CREATE ON SCHEMA public TO ${runtimeRoleName};
+      GRANT SELECT ON microjbase.schema_migrations TO ${runtimeRoleName};
+      GRANT SELECT, INSERT ON microjbase.users TO ${runtimeRoleName};
+      GRANT SELECT, INSERT, UPDATE ON microjbase.sessions TO ${runtimeRoleName};
     `)
   })
 }

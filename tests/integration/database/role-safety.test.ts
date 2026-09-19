@@ -195,17 +195,20 @@ describe("runtime role safety", () => {
 
   it("rejects exposed tables owned by the runtime role without forced RLS", async () => {
     const tableName = `test_runtime_owned_${Date.now()}`
-    const runtimeClient = new pg.Client({ connectionString: databaseUrl })
-    await runtimeClient.connect()
-    try {
-      await runtimeClient.query(`
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(`
         CREATE TABLE public.${tableName} (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           user_id UUID
         );
+        ALTER TABLE public.${tableName} OWNER TO ${RUNTIME_ROLE_NAME};
         ALTER TABLE public.${tableName} ENABLE ROW LEVEL SECURITY;
       `)
+    })
 
+    const runtimeClient = new pg.Client({ connectionString: databaseUrl })
+    await runtimeClient.connect()
+    try {
       await expect(
         checkTableOwnershipAndRls(runtimeClient, [
           { schema: "public", table: tableName },
@@ -304,6 +307,145 @@ describe("runtime role safety", () => {
 
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(`DROP TABLE IF EXISTS public.${tableName}`)
+    })
+  })
+
+  it("rejects exposed tables with policies only for unrelated roles", async () => {
+    const tableName = `test_unrelated_policy_${Date.now()}`
+    const otherRole = `test_other_role_${Date.now()}`
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(
+        `CREATE ROLE ${otherRole} WITH LOGIN PASSWORD 'other_password'`,
+      )
+      await admin.query(`
+        CREATE TABLE public.${tableName} (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id UUID
+        );
+        ALTER TABLE public.${tableName} ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE public.${tableName} FORCE ROW LEVEL SECURITY;
+        CREATE POLICY ${tableName}_other ON public.${tableName}
+          FOR ALL TO ${otherRole} USING (true) WITH CHECK (true);
+      `)
+    })
+
+    const client = await pool.connect()
+    try {
+      await expect(
+        checkApplicablePolicies(client, [
+          { schema: "public", table: tableName },
+        ]),
+      ).rejects.toMatchObject({
+        code: "DATABASE_UNAVAILABLE",
+        message: `No row-level security policies on public.${tableName} apply to the runtime role`,
+      })
+    } finally {
+      client.release()
+    }
+
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(`DROP TABLE IF EXISTS public.${tableName}`)
+      await admin.query(`DROP ROLE IF EXISTS ${otherRole}`)
+    })
+  })
+
+  it("fails closed when schema USAGE privilege is missing", async () => {
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(
+        `REVOKE USAGE ON SCHEMA microjbase FROM ${RUNTIME_ROLE_NAME};`,
+      )
+    })
+
+    const client = await pool.connect()
+    try {
+      await expect(checkRuntimeRoleSafety(client)).rejects.toMatchObject({
+        code: "DATABASE_UNAVAILABLE",
+        message:
+          "Runtime role is missing required privilege USAGE on schema microjbase",
+      })
+    } finally {
+      client.release()
+    }
+
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(
+        `GRANT USAGE ON SCHEMA microjbase TO ${RUNTIME_ROLE_NAME};`,
+      )
+    })
+  })
+
+  it("fails closed when SELECT on schema_migrations is missing", async () => {
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(
+        `REVOKE SELECT ON microjbase.schema_migrations FROM ${RUNTIME_ROLE_NAME};`,
+      )
+    })
+
+    const client = await pool.connect()
+    try {
+      await expect(checkRuntimeRoleSafety(client)).rejects.toMatchObject({
+        code: "DATABASE_UNAVAILABLE",
+        message:
+          "Runtime role is missing required privilege SELECT on microjbase.schema_migrations",
+      })
+    } finally {
+      client.release()
+    }
+
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(
+        `GRANT SELECT ON microjbase.schema_migrations TO ${RUNTIME_ROLE_NAME};`,
+      )
+    })
+  })
+
+  it("fails closed when INSERT on users is missing", async () => {
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(
+        `REVOKE INSERT ON microjbase.users FROM ${RUNTIME_ROLE_NAME};`,
+      )
+    })
+
+    const client = await pool.connect()
+    try {
+      await expect(checkRuntimeRoleSafety(client)).rejects.toMatchObject({
+        code: "DATABASE_UNAVAILABLE",
+        message:
+          "Runtime role is missing required privilege INSERT on microjbase.users",
+      })
+    } finally {
+      client.release()
+    }
+
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(
+        `GRANT INSERT ON microjbase.users TO ${RUNTIME_ROLE_NAME};`,
+      )
+    })
+  })
+
+  it("fails closed when UPDATE on sessions is missing", async () => {
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(
+        `REVOKE UPDATE ON microjbase.sessions FROM ${RUNTIME_ROLE_NAME};`,
+      )
+    })
+
+    const client = await pool.connect()
+    try {
+      await expect(checkRuntimeRoleSafety(client)).rejects.toMatchObject({
+        code: "DATABASE_UNAVAILABLE",
+        message:
+          "Runtime role is missing required privilege UPDATE on microjbase.sessions",
+      })
+    } finally {
+      client.release()
+    }
+
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(
+        `GRANT UPDATE ON microjbase.sessions TO ${RUNTIME_ROLE_NAME};`,
+      )
     })
   })
 })

@@ -14,7 +14,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test:unit": "vitest run --project unit",
-    "test:integration": "vitest run --project integration --no-file-parallelism",
+    "test:integration": "vitest run --project integration",
     "test:e2e": "vitest run --project e2e",
     "test": "vitest run",
     "migrate": "tsx scripts/migrate.ts",

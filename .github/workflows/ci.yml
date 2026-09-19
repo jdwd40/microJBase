@@ -19,7 +19,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U microjbase -d microjbase_dev"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -37,34 +37,25 @@ jobs:
           node-version: 22.13.0
           cache: npm
 
+      - name: Install dependencies
+        run: npm ci
+
       - name: Bootstrap databases and roles
         run: |
-          PGPASSWORD=microjbase_dev_password psql -h localhost -U microjbase -d microjbase_dev -c "
-            DROP DATABASE IF EXISTS microjbase_migration_test;
-            DROP DATABASE IF EXISTS microjbase_integration_test;
-            CREATE DATABASE microjbase_migration_test;
-            CREATE DATABASE microjbase_integration_test;
-          "
-          PGPASSWORD=microjbase_dev_password psql -h localhost -U microjbase -d microjbase_dev -c "
-            DROP ROLE IF EXISTS microjbase_runtime;
-            CREATE ROLE microjbase_runtime WITH LOGIN PASSWORD 'microjbase_runtime_password' NOSUPERUSER NOBYPASSRLS;
-          "
-          npm ci
+          PGPASSWORD=microjbase_dev_password dropdb -h localhost -U microjbase --if-exists microjbase_migration_test
+          PGPASSWORD=microjbase_dev_password dropdb -h localhost -U microjbase --if-exists microjbase_integration_test
+          PGPASSWORD=microjbase_dev_password createdb -h localhost -U microjbase microjbase_migration_test
+          PGPASSWORD=microjbase_dev_password createdb -h localhost -U microjbase microjbase_integration_test
+          PGPASSWORD=microjbase_dev_password psql -h localhost -U microjbase -d microjbase_dev -c "DROP ROLE IF EXISTS microjbase_runtime;"
+          PGPASSWORD=microjbase_dev_password psql -h localhost -U microjbase -d microjbase_dev -c "CREATE ROLE microjbase_runtime WITH LOGIN PASSWORD 'microjbase_runtime_password' NOSUPERUSER NOBYPASSRLS;"
           MIGRATION_DATABASE_URL="$MIGRATION_DATABASE_URL" npm run migrate
           MIGRATION_DATABASE_URL="$INTEGRATION_ADMIN_DATABASE_URL" npm run migrate
           PGPASSWORD=microjbase_dev_password psql -h localhost -U microjbase -d microjbase_integration_test -c "
             GRANT USAGE ON SCHEMA microjbase TO microjbase_runtime;
-            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA microjbase TO microjbase_runtime;
-            GRANT SELECT ON ALL SEQUENCES IN SCHEMA microjbase TO microjbase_runtime;
-            ALTER DEFAULT PRIVILEGES IN SCHEMA microjbase
-              GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO microjbase_runtime;
-            ALTER DEFAULT PRIVILEGES IN SCHEMA microjbase
-              GRANT SELECT ON SEQUENCES TO microjbase_runtime;
-            GRANT CREATE ON SCHEMA public TO microjbase_runtime;
+            GRANT SELECT ON microjbase.schema_migrations TO microjbase_runtime;
+            GRANT SELECT, INSERT ON microjbase.users TO microjbase_runtime;
+            GRANT SELECT, INSERT, UPDATE ON microjbase.sessions TO microjbase_runtime;
           "
-
-      - name: Install dependencies
-        run: npm ci
 
       - name: Format check
         run: npm run format:check
