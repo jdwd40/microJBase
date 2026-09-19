@@ -9,11 +9,13 @@ import { pathToFileURL } from "node:url"
 
 import Fastify, { type FastifyInstance } from "fastify"
 
+import { healthStatus } from "./shared/health.js"
+
 export function buildServer(): FastifyInstance {
   const app = Fastify({ logger: true })
 
   app.get("/health", async () => ({
-    data: { status: "ok" },
+    data: { status: healthStatus },
     error: null,
   }))
 
