@@ -21,7 +21,8 @@ export interface TableRegistry {
 // The data repository boundary uses JSON-ready values. PostgreSQL-to-JSON
 // conversion rules are fixed in docs/database-spec.md.
 export type JsonPrimitive = string | number | boolean | null
-export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
+export type JsonValue =
+  JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
 export type DataRow = Record<string, JsonValue>
 
 export interface Page<T> {
