@@ -177,6 +177,27 @@ function build() {
   return { service, repository, registry }
 }
 
+function buildWithWriteSpies() {
+  const built = build()
+  let createCalls = 0
+  let updateCalls = 0
+  const originalCreate = built.repository.create.bind(built.repository)
+  const originalUpdate = built.repository.updateById.bind(built.repository)
+  built.repository.create = async (input) => {
+    createCalls += 1
+    return originalCreate(input)
+  }
+  built.repository.updateById = async (input) => {
+    updateCalls += 1
+    return originalUpdate(input)
+  }
+  return {
+    ...built,
+    createCalls: () => createCalls,
+    updateCalls: () => updateCalls,
+  }
+}
+
 describe("DataService", () => {
   describe("list", () => {
     it("returns owned rows with default limit/offset", async () => {
@@ -677,6 +698,178 @@ describe("DataService", () => {
         code: "VALIDATION_ERROR",
         status: 400,
       })
+    })
+  })
+
+  describe("JSON value boundary", () => {
+    it("accepts nested objects and arrays on create and update", async () => {
+      const { service, repository } = build()
+      const meta = {
+        tags: ["a", "b"],
+        nested: { n: 1, ok: true, empty: null },
+        scores: [1, 2, 3],
+      }
+      const created = await service.create({
+        identity: ALICE,
+        tableAlias: "todos",
+        values: { title: "Nested", meta },
+      })
+      expect(created["meta"]).toEqual(meta)
+
+      const id = String(created["id"])
+      const updatedMeta = { tags: [], nested: { deep: [{ x: "y" }] } }
+      const updated = await service.update({
+        identity: ALICE,
+        tableAlias: "todos",
+        id,
+        values: { meta: updatedMeta },
+      })
+      expect(updated["meta"]).toEqual(updatedMeta)
+      void repository
+    })
+
+    it.each([
+      { label: "Date", values: { title: "x", meta: new Date() } },
+      { label: "Buffer", values: { title: "x", meta: Buffer.from("hi") } },
+      { label: "bigint", values: { title: "x", meta: 1n } },
+      { label: "NaN", values: { title: "x", meta: Number.NaN } },
+      {
+        label: "Infinity",
+        values: { title: "x", meta: Number.POSITIVE_INFINITY },
+      },
+      { label: "undefined", values: { title: "x", meta: undefined } },
+      { label: "function", values: { title: "x", meta: () => 1 } },
+    ])(
+      "rejects non-JSON $label on create and does not call repository",
+      async ({ values }) => {
+        const { service, createCalls } = buildWithWriteSpies()
+        await expect(
+          service.create({ identity: ALICE, tableAlias: "todos", values }),
+        ).rejects.toMatchObject({
+          code: "VALIDATION_ERROR",
+          status: 400,
+          details: { body: "Must contain JSON-compatible values only" },
+        })
+        expect(createCalls()).toBe(0)
+      },
+    )
+
+    it("rejects cyclic nested objects on create without calling repository", async () => {
+      const { service, createCalls } = buildWithWriteSpies()
+      const cyclic: Record<string, unknown> = { title: "x" }
+      cyclic["meta"] = cyclic
+      await expect(
+        service.create({
+          identity: ALICE,
+          tableAlias: "todos",
+          values: cyclic,
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        status: 400,
+      })
+      expect(createCalls()).toBe(0)
+    })
+
+    it("rejects array holes on create without calling repository", async () => {
+      const { service, createCalls } = buildWithWriteSpies()
+      const holey = [1]
+      holey[2] = 3
+      await expect(
+        service.create({
+          identity: ALICE,
+          tableAlias: "todos",
+          values: { title: "x", meta: holey },
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        status: 400,
+      })
+      expect(createCalls()).toBe(0)
+    })
+
+    it("rejects non-JSON values on update without calling repository", async () => {
+      const { service, repository, updateCalls } = buildWithWriteSpies()
+      const id = "11111111-1111-1111-1111-111111111111"
+      repository.seed("todos", ALICE.userId, {
+        id,
+        title: "Seed",
+        completed: false,
+      })
+      await expect(
+        service.update({
+          identity: ALICE,
+          tableAlias: "todos",
+          id,
+          values: { meta: new Date() },
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        status: 400,
+        details: { body: "Must contain JSON-compatible values only" },
+      })
+      expect(updateCalls()).toBe(0)
+    })
+  })
+
+  describe("__proto__ column bypass", () => {
+    it("rejects __proto__ on create and does not call repository", async () => {
+      const { service, createCalls } = buildWithWriteSpies()
+      const values = JSON.parse('{"__proto__":"x","title":"ok"}') as Record<
+        string,
+        unknown
+      >
+      await expect(
+        service.create({ identity: ALICE, tableAlias: "todos", values }),
+      ).rejects.toThrow(DataError)
+      try {
+        await service.create({ identity: ALICE, tableAlias: "todos", values })
+      } catch (error: unknown) {
+        const err = error as DataError
+        expect(err.code).toBe("VALIDATION_ERROR")
+        expect(err.status).toBe(400)
+        expect(
+          Object.prototype.hasOwnProperty.call(err.details, "__proto__"),
+        ).toBe(true)
+        expect(err.details?.["__proto__"]).toBe("Column is not insertable")
+      }
+      expect(createCalls()).toBe(0)
+    })
+
+    it("rejects __proto__ on update and does not call repository", async () => {
+      const { service, repository, updateCalls } = buildWithWriteSpies()
+      const id = "11111111-1111-1111-1111-111111111111"
+      repository.seed("todos", ALICE.userId, {
+        id,
+        title: "Seed",
+        completed: false,
+      })
+      const values = JSON.parse('{"__proto__":"x"}') as Record<string, unknown>
+      await expect(
+        service.update({
+          identity: ALICE,
+          tableAlias: "todos",
+          id,
+          values,
+        }),
+      ).rejects.toThrow(DataError)
+      try {
+        await service.update({
+          identity: ALICE,
+          tableAlias: "todos",
+          id,
+          values,
+        })
+      } catch (error: unknown) {
+        const err = error as DataError
+        expect(err.code).toBe("VALIDATION_ERROR")
+        expect(err.status).toBe(400)
+        expect(
+          Object.prototype.hasOwnProperty.call(err.details, "__proto__"),
+        ).toBe(true)
+        expect(err.details?.["__proto__"]).toBe("Column is not updatable")
+      }
+      expect(updateCalls()).toBe(0)
     })
   })
 

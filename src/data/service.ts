@@ -13,7 +13,7 @@ import {
   assertKeysAllowed,
   isCanonicalUuid,
   requireCanonicalUuid,
-  requireNonEmptyPlainObject,
+  requireJsonDataRow,
   resolveLimit,
   resolveOffset,
 } from "./validate.js"
@@ -107,7 +107,7 @@ export class DataServiceImpl implements DataService {
     values: unknown
   }): Promise<DataRow> {
     const table = this.resolveTable(input.tableAlias)
-    const values = requireNonEmptyPlainObject(input.values)
+    const values = requireJsonDataRow(input.values)
     assertKeysAllowed(values, table.insertableColumns, "insertable")
 
     if (Object.prototype.hasOwnProperty.call(values, "id")) {
@@ -122,11 +122,11 @@ export class DataServiceImpl implements DataService {
       }
     }
 
-    // Pass only the validated values object; do not invent columns.
+    // Pass only the validated JSON values object; do not invent columns.
     return this.repository.create({
       identity: input.identity,
       table,
-      values: values as DataRow,
+      values,
     })
   }
 
@@ -138,7 +138,7 @@ export class DataServiceImpl implements DataService {
   }): Promise<DataRow> {
     const table = this.resolveTable(input.tableAlias)
     const id = requireCanonicalUuid(input.id)
-    const values = requireNonEmptyPlainObject(input.values)
+    const values = requireJsonDataRow(input.values)
 
     if (Object.prototype.hasOwnProperty.call(values, "id")) {
       throw new DataError(
@@ -155,7 +155,7 @@ export class DataServiceImpl implements DataService {
       identity: input.identity,
       table,
       id,
-      values: values as DataRow,
+      values,
     })
     if (row === null) {
       throw new DataError("ROW_NOT_FOUND", "Row not found", 404)
