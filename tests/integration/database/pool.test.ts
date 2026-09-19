@@ -2,7 +2,7 @@ import { describe, expect, it, beforeAll, afterAll } from "vitest"
 import pg from "pg"
 
 import { createPool, type Pool } from "../../../src/database/pool.js"
-import { applyMigrationsAndGrants } from "./bootstrap.js"
+import { applyMigrationsAndGrants, withClient } from "./bootstrap.js"
 
 const databaseUrl = process.env.INTEGRATION_DATABASE_URL
 if (!databaseUrl) {
@@ -137,5 +137,49 @@ describe("database pool", () => {
       expect(log).not.toMatch(/password authentication failed|ECONNREFUSED/)
     }
     await badPool.close()
+  })
+
+  it("does not emit connection metadata when an idle pool client is terminated", async () => {
+    const logs: string[] = []
+    const logger = {
+      error: (msg: string) => logs.push(msg),
+      warn: () => {},
+      info: () => {},
+      debug: () => {},
+    }
+    const localPool = createPool({
+      databaseUrl,
+      maxConnections: 1,
+      logger,
+    })
+
+    const client = await localPool.connect()
+    const backendPid = (
+      await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")
+    ).rows[0]?.pid
+    client.release()
+
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(`SELECT pg_terminate_backend(${backendPid ?? 0})`)
+    })
+
+    // Give the pool time to receive the error event from the terminated idle client.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+
+    expect(logs.length).toBeGreaterThan(0)
+    for (const log of logs) {
+      expect(log).not.toContain(databaseUrl)
+      expect(log).not.toMatch(
+        /microjbase_runtime|127\.0\.0\.1|543[0-9]|microjbase/,
+      )
+      expect(log).not.toMatch(/password|terminat|backend|connection|\bpid\b/i)
+    }
+
+    // The pool must remain usable: the terminated client is evicted and a fresh
+    // client is created for the next checkout.
+    const result = await localPool.query<{ one: number }>("SELECT 1 AS one")
+    expect(result.rows).toEqual([{ one: 1 }])
+
+    await localPool.close()
   })
 })

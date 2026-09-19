@@ -1,6 +1,6 @@
 // Migration command entry point for microJBase v0.1.
 //
-// Reads MIGRATION_DATABASE_URL (or DATABASE_URL as fallback) and applies any
+// Reads MIGRATION_DATABASE_URL and applies any
 // pending forward migrations under migrations/*.sql using an advisory lock.
 // This script is intended to be run explicitly by an operator or CI, not by
 // the running API process.

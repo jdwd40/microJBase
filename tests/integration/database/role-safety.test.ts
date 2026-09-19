@@ -14,6 +14,7 @@ import {
   cleanMigrations,
   withClient,
 } from "./bootstrap.js"
+import { quoteIdentifier, quoteLiteral } from "./helpers.js"
 
 const databaseUrl = process.env.INTEGRATION_DATABASE_URL
 if (!databaseUrl) {
@@ -30,6 +31,10 @@ if (!adminDatabaseUrl) {
 }
 
 const RUNTIME_ROLE_NAME = "microjbase_runtime"
+
+function runtimeRoleId(): string {
+  return quoteIdentifier(RUNTIME_ROLE_NAME)
+}
 
 describe("runtime role safety", () => {
   let pool: Pool
@@ -76,7 +81,7 @@ describe("runtime role safety", () => {
       const password = `bypass_password_${Date.now()}`
       try {
         await admin.query(
-          `CREATE ROLE ${roleName} WITH LOGIN BYPASSRLS PASSWORD '${password}'`,
+          `CREATE ROLE ${quoteIdentifier(roleName)} WITH LOGIN BYPASSRLS PASSWORD ${quoteLiteral(password)}`,
         )
         const bypassUrl = adminDatabaseUrl.replace(
           /\/\/[^:]+:[^@]+@/,
@@ -95,9 +100,11 @@ describe("runtime role safety", () => {
           await bypassClient.end()
         }
       } finally {
-        await admin.query(`DROP ROLE IF EXISTS ${roleName}`).catch(() => {
-          // ignore cleanup failure
-        })
+        await admin
+          .query(`DROP ROLE IF EXISTS ${quoteIdentifier(roleName)}`)
+          .catch(() => {
+            // ignore cleanup failure
+          })
       }
     })
   })
@@ -106,13 +113,13 @@ describe("runtime role safety", () => {
     const tableName = `test_rls_${Date.now()}`
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(`
-        CREATE TABLE public.${tableName} (
+        CREATE TABLE public.${quoteIdentifier(tableName)} (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           user_id UUID,
           title TEXT
         );
-        ALTER TABLE public.${tableName} ENABLE ROW LEVEL SECURITY;
-        ALTER TABLE public.${tableName} FORCE ROW LEVEL SECURITY;
+        ALTER TABLE public.${quoteIdentifier(tableName)} ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE public.${quoteIdentifier(tableName)} FORCE ROW LEVEL SECURITY;
       `)
     })
 
@@ -129,7 +136,9 @@ describe("runtime role safety", () => {
     }
 
     await withClient(adminDatabaseUrl, async (admin) => {
-      await admin.query(`DROP TABLE IF EXISTS public.${tableName}`)
+      await admin.query(
+        `DROP TABLE IF EXISTS public.${quoteIdentifier(tableName)}`,
+      )
     })
   })
 
@@ -137,7 +146,7 @@ describe("runtime role safety", () => {
     const tableName = `test_no_rls_${Date.now()}`
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(`
-        CREATE TABLE public.${tableName} (id UUID PRIMARY KEY DEFAULT gen_random_uuid());
+        CREATE TABLE public.${quoteIdentifier(tableName)} (id UUID PRIMARY KEY DEFAULT gen_random_uuid());
       `)
     })
 
@@ -158,7 +167,9 @@ describe("runtime role safety", () => {
     }
 
     await withClient(adminDatabaseUrl, async (admin) => {
-      await admin.query(`DROP TABLE IF EXISTS public.${tableName}`)
+      await admin.query(
+        `DROP TABLE IF EXISTS public.${quoteIdentifier(tableName)}`,
+      )
     })
   })
 
@@ -166,11 +177,11 @@ describe("runtime role safety", () => {
     const tableName = `test_no_force_rls_${Date.now()}`
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(`
-        CREATE TABLE public.${tableName} (
+        CREATE TABLE public.${quoteIdentifier(tableName)} (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           user_id UUID
         );
-        ALTER TABLE public.${tableName} ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE public.${quoteIdentifier(tableName)} ENABLE ROW LEVEL SECURITY;
       `)
     })
 
@@ -189,7 +200,9 @@ describe("runtime role safety", () => {
     }
 
     await withClient(adminDatabaseUrl, async (admin) => {
-      await admin.query(`DROP TABLE IF EXISTS public.${tableName}`)
+      await admin.query(
+        `DROP TABLE IF EXISTS public.${quoteIdentifier(tableName)}`,
+      )
     })
   })
 
@@ -197,12 +210,12 @@ describe("runtime role safety", () => {
     const tableName = `test_runtime_owned_${Date.now()}`
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(`
-        CREATE TABLE public.${tableName} (
+        CREATE TABLE public.${quoteIdentifier(tableName)} (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           user_id UUID
         );
-        ALTER TABLE public.${tableName} OWNER TO ${RUNTIME_ROLE_NAME};
-        ALTER TABLE public.${tableName} ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE public.${quoteIdentifier(tableName)} OWNER TO ${runtimeRoleId()};
+        ALTER TABLE public.${quoteIdentifier(tableName)} ENABLE ROW LEVEL SECURITY;
       `)
     })
 
@@ -219,7 +232,7 @@ describe("runtime role safety", () => {
       })
     } finally {
       await runtimeClient
-        .query(`DROP TABLE IF EXISTS public.${tableName}`)
+        .query(`DROP TABLE IF EXISTS public.${quoteIdentifier(tableName)}`)
         .catch(() => {})
       await runtimeClient.end()
     }
@@ -249,14 +262,14 @@ describe("runtime role safety", () => {
     const tableName = `test_policy_${Date.now()}`
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(`
-        CREATE TABLE public.${tableName} (
+        CREATE TABLE public.${quoteIdentifier(tableName)} (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           user_id UUID
         );
-        ALTER TABLE public.${tableName} ENABLE ROW LEVEL SECURITY;
-        ALTER TABLE public.${tableName} FORCE ROW LEVEL SECURITY;
-        CREATE POLICY ${tableName}_all ON public.${tableName}
-          FOR ALL TO ${RUNTIME_ROLE_NAME} USING (true) WITH CHECK (true);
+        ALTER TABLE public.${quoteIdentifier(tableName)} ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE public.${quoteIdentifier(tableName)} FORCE ROW LEVEL SECURITY;
+        CREATE POLICY ${quoteIdentifier(`${tableName}_all`)} ON public.${quoteIdentifier(tableName)}
+          FOR ALL TO ${runtimeRoleId()} USING (true) WITH CHECK (true);
       `)
     })
 
@@ -274,7 +287,84 @@ describe("runtime role safety", () => {
     }
 
     await withClient(adminDatabaseUrl, async (admin) => {
-      await admin.query(`DROP TABLE IF EXISTS public.${tableName}`)
+      await admin.query(
+        `DROP TABLE IF EXISTS public.${quoteIdentifier(tableName)}`,
+      )
+    })
+  })
+
+  it("accepts policies applying to PUBLIC", async () => {
+    const tableName = `test_policy_public_${Date.now()}`
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(`
+        CREATE TABLE public.${quoteIdentifier(tableName)} (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id UUID
+        );
+        ALTER TABLE public.${quoteIdentifier(tableName)} ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE public.${quoteIdentifier(tableName)} FORCE ROW LEVEL SECURITY;
+        CREATE POLICY ${quoteIdentifier(`${tableName}_public`)} ON public.${quoteIdentifier(tableName)}
+          FOR ALL TO PUBLIC USING (true) WITH CHECK (true);
+      `)
+    })
+
+    const client = await pool.connect()
+    try {
+      const policies = await checkApplicablePolicies(client, [
+        { schema: "public", table: tableName },
+      ])
+      expect(policies.length).toBeGreaterThan(0)
+    } finally {
+      client.release()
+    }
+
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(
+        `DROP TABLE IF EXISTS public.${quoteIdentifier(tableName)}`,
+      )
+    })
+  })
+
+  it("accepts policies applying through inherited role membership", async () => {
+    const tableName = `test_policy_inherited_${Date.now()}`
+    const parentRole = `test_parent_role_${Date.now()}`
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(
+        `CREATE ROLE ${quoteIdentifier(parentRole)} WITH LOGIN PASSWORD ${quoteLiteral("parent_password")} NOINHERIT`,
+      )
+      await admin.query(
+        `GRANT ${quoteIdentifier(parentRole)} TO ${runtimeRoleId()}`,
+      )
+      await admin.query(`
+        CREATE TABLE public.${quoteIdentifier(tableName)} (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id UUID
+        );
+        ALTER TABLE public.${quoteIdentifier(tableName)} ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE public.${quoteIdentifier(tableName)} FORCE ROW LEVEL SECURITY;
+        CREATE POLICY ${quoteIdentifier(`${tableName}_inherited`)} ON public.${quoteIdentifier(tableName)}
+          FOR ALL TO ${quoteIdentifier(parentRole)} USING (true) WITH CHECK (true);
+      `)
+    })
+
+    const client = await pool.connect()
+    try {
+      const policies = await checkApplicablePolicies(client, [
+        { schema: "public", table: tableName },
+      ])
+      expect(policies.length).toBeGreaterThan(0)
+    } finally {
+      client.release()
+    }
+
+    await withClient(adminDatabaseUrl, async (admin) => {
+      await admin.query(
+        `DROP TABLE IF EXISTS public.${quoteIdentifier(tableName)}`,
+      )
+      await admin.query(
+        `REVOKE ${quoteIdentifier(parentRole)} FROM ${runtimeRoleId()}`,
+      )
+      await admin.query(`DROP ROLE IF EXISTS ${quoteIdentifier(parentRole)}`)
     })
   })
 
@@ -282,12 +372,12 @@ describe("runtime role safety", () => {
     const tableName = `test_no_policy_${Date.now()}`
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(`
-        CREATE TABLE public.${tableName} (
+        CREATE TABLE public.${quoteIdentifier(tableName)} (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           user_id UUID
         );
-        ALTER TABLE public.${tableName} ENABLE ROW LEVEL SECURITY;
-        ALTER TABLE public.${tableName} FORCE ROW LEVEL SECURITY;
+        ALTER TABLE public.${quoteIdentifier(tableName)} ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE public.${quoteIdentifier(tableName)} FORCE ROW LEVEL SECURITY;
       `)
     })
 
@@ -306,7 +396,9 @@ describe("runtime role safety", () => {
     }
 
     await withClient(adminDatabaseUrl, async (admin) => {
-      await admin.query(`DROP TABLE IF EXISTS public.${tableName}`)
+      await admin.query(
+        `DROP TABLE IF EXISTS public.${quoteIdentifier(tableName)}`,
+      )
     })
   })
 
@@ -315,17 +407,17 @@ describe("runtime role safety", () => {
     const otherRole = `test_other_role_${Date.now()}`
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(
-        `CREATE ROLE ${otherRole} WITH LOGIN PASSWORD 'other_password'`,
+        `CREATE ROLE ${quoteIdentifier(otherRole)} WITH LOGIN PASSWORD ${quoteLiteral("other_password")}`,
       )
       await admin.query(`
-        CREATE TABLE public.${tableName} (
+        CREATE TABLE public.${quoteIdentifier(tableName)} (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           user_id UUID
         );
-        ALTER TABLE public.${tableName} ENABLE ROW LEVEL SECURITY;
-        ALTER TABLE public.${tableName} FORCE ROW LEVEL SECURITY;
-        CREATE POLICY ${tableName}_other ON public.${tableName}
-          FOR ALL TO ${otherRole} USING (true) WITH CHECK (true);
+        ALTER TABLE public.${quoteIdentifier(tableName)} ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE public.${quoteIdentifier(tableName)} FORCE ROW LEVEL SECURITY;
+        CREATE POLICY ${quoteIdentifier(`${tableName}_other`)} ON public.${quoteIdentifier(tableName)}
+          FOR ALL TO ${quoteIdentifier(otherRole)} USING (true) WITH CHECK (true);
       `)
     })
 
@@ -344,15 +436,17 @@ describe("runtime role safety", () => {
     }
 
     await withClient(adminDatabaseUrl, async (admin) => {
-      await admin.query(`DROP TABLE IF EXISTS public.${tableName}`)
-      await admin.query(`DROP ROLE IF EXISTS ${otherRole}`)
+      await admin.query(
+        `DROP TABLE IF EXISTS public.${quoteIdentifier(tableName)}`,
+      )
+      await admin.query(`DROP ROLE IF EXISTS ${quoteIdentifier(otherRole)}`)
     })
   })
 
   it("fails closed when schema USAGE privilege is missing", async () => {
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(
-        `REVOKE USAGE ON SCHEMA microjbase FROM ${RUNTIME_ROLE_NAME};`,
+        `REVOKE USAGE ON SCHEMA microjbase FROM ${runtimeRoleId()};`,
       )
     })
 
@@ -369,7 +463,7 @@ describe("runtime role safety", () => {
 
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(
-        `GRANT USAGE ON SCHEMA microjbase TO ${RUNTIME_ROLE_NAME};`,
+        `GRANT USAGE ON SCHEMA microjbase TO ${runtimeRoleId()};`,
       )
     })
   })
@@ -377,7 +471,7 @@ describe("runtime role safety", () => {
   it("fails closed when SELECT on schema_migrations is missing", async () => {
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(
-        `REVOKE SELECT ON microjbase.schema_migrations FROM ${RUNTIME_ROLE_NAME};`,
+        `REVOKE SELECT ON microjbase.schema_migrations FROM ${runtimeRoleId()};`,
       )
     })
 
@@ -394,7 +488,7 @@ describe("runtime role safety", () => {
 
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(
-        `GRANT SELECT ON microjbase.schema_migrations TO ${RUNTIME_ROLE_NAME};`,
+        `GRANT SELECT ON microjbase.schema_migrations TO ${runtimeRoleId()};`,
       )
     })
   })
@@ -402,7 +496,7 @@ describe("runtime role safety", () => {
   it("fails closed when INSERT on users is missing", async () => {
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(
-        `REVOKE INSERT ON microjbase.users FROM ${RUNTIME_ROLE_NAME};`,
+        `REVOKE INSERT ON microjbase.users FROM ${runtimeRoleId()};`,
       )
     })
 
@@ -419,7 +513,7 @@ describe("runtime role safety", () => {
 
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(
-        `GRANT INSERT ON microjbase.users TO ${RUNTIME_ROLE_NAME};`,
+        `GRANT INSERT ON microjbase.users TO ${runtimeRoleId()};`,
       )
     })
   })
@@ -427,7 +521,7 @@ describe("runtime role safety", () => {
   it("fails closed when UPDATE on sessions is missing", async () => {
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(
-        `REVOKE UPDATE ON microjbase.sessions FROM ${RUNTIME_ROLE_NAME};`,
+        `REVOKE UPDATE ON microjbase.sessions FROM ${runtimeRoleId()};`,
       )
     })
 
@@ -444,7 +538,7 @@ describe("runtime role safety", () => {
 
     await withClient(adminDatabaseUrl, async (admin) => {
       await admin.query(
-        `GRANT UPDATE ON microjbase.sessions TO ${RUNTIME_ROLE_NAME};`,
+        `GRANT UPDATE ON microjbase.sessions TO ${runtimeRoleId()};`,
       )
     })
   })

@@ -5,6 +5,8 @@
 
 import pg from "pg"
 
+import { quoteIdentifier } from "./helpers.js"
+
 export async function withClient<T>(
   databaseUrl: string,
   fn: (client: pg.Client) => Promise<T>,
@@ -26,11 +28,12 @@ export async function applyMigrationsAndGrants(
   await migrate({ databaseUrl: adminUrl })
 
   await withClient(adminUrl, async (client) => {
+    const role = quoteIdentifier(runtimeRoleName)
     await client.query(`
-      GRANT USAGE ON SCHEMA microjbase TO ${runtimeRoleName};
-      GRANT SELECT ON microjbase.schema_migrations TO ${runtimeRoleName};
-      GRANT SELECT, INSERT ON microjbase.users TO ${runtimeRoleName};
-      GRANT SELECT, INSERT, UPDATE ON microjbase.sessions TO ${runtimeRoleName};
+      GRANT USAGE ON SCHEMA microjbase TO ${role};
+      GRANT SELECT ON microjbase.schema_migrations TO ${role};
+      GRANT SELECT, INSERT ON microjbase.users TO ${role};
+      GRANT SELECT, INSERT, UPDATE ON microjbase.sessions TO ${role};
     `)
   })
 }

@@ -8,7 +8,6 @@ export {
   translatePoolError,
   type Pool,
   type PoolConfig,
-  type PoolErrorContext,
 } from "./pool.js"
 export {
   createTransactionRunner,

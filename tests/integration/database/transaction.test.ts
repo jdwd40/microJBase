@@ -6,7 +6,9 @@ import {
   type Pool,
   type TransactionRunner,
 } from "../../../src/database/index.js"
+import { AppError } from "../../../src/core/index.js"
 import { applyMigrationsAndGrants } from "./bootstrap.js"
+import { quoteIdentifier } from "./helpers.js"
 
 const databaseUrl = process.env.INTEGRATION_DATABASE_URL
 if (!databaseUrl) {
@@ -48,17 +50,17 @@ describe("transaction helper", () => {
 
   it("rolls back on error", async () => {
     const tempTable = `temp_tx_test_${Date.now()}`
-    await pool.query(`CREATE TEMP TABLE ${tempTable} (id int)`)
+    await pool.query(`CREATE TEMP TABLE ${quoteIdentifier(tempTable)} (id int)`)
 
     await expect(
       runner.withTransaction(async (ctx) => {
-        await ctx.query(`INSERT INTO ${tempTable} VALUES (1)`)
+        await ctx.query(`INSERT INTO ${quoteIdentifier(tempTable)} VALUES (1)`)
         throw new Error("boom")
       }),
     ).rejects.toThrow("boom")
 
     const result = await pool.query<{ count: number }>(
-      `SELECT COUNT(*)::int AS count FROM ${tempTable}`,
+      `SELECT COUNT(*)::int AS count FROM ${quoteIdentifier(tempTable)}`,
     )
     expect(result.rows[0]?.count).toBe(0)
   })
@@ -117,5 +119,54 @@ describe("transaction helper", () => {
     })
 
     expect(leaked).toBeNull()
+  })
+
+  it("translates PostgreSQL errors into safe application errors after rollback", async () => {
+    const sentinel = `missing_relation_${Date.now()}`
+
+    let caught: unknown
+    try {
+      await runner.withTransaction(async (ctx) => {
+        await ctx.query(`SELECT * FROM ${quoteIdentifier(sentinel)}`)
+      })
+    } catch (error: unknown) {
+      caught = error
+    }
+
+    expect(caught).toBeDefined()
+    expect(caught).toMatchObject({
+      code: "INTERNAL_ERROR",
+      message: "Transaction failed and was rolled back",
+    })
+
+    const serialized = JSON.stringify(caught)
+    expect(serialized).not.toContain(sentinel)
+    expect(serialized).not.toContain("42P01")
+    expect(serialized).not.toMatch(
+      /relation|does not exist|current transaction is aborted/i,
+    )
+    expect(serialized).not.toContain(databaseUrl)
+
+    // Connection must remain reusable after rollback.
+    const result = await pool.query<{ one: number }>("SELECT 1 AS one")
+    expect(result.rows).toEqual([{ one: 1 }])
+  })
+
+  it("preserves domain AppError values unchanged", async () => {
+    const domainError = new AppError(
+      "EMAIL_ALREADY_REGISTERED",
+      "Email is already registered",
+      409,
+    )
+
+    await expect(
+      runner.withTransaction(async () => {
+        throw domainError
+      }),
+    ).rejects.toMatchObject({
+      code: "EMAIL_ALREADY_REGISTERED",
+      message: "Email is already registered",
+      status: 409,
+    })
   })
 })

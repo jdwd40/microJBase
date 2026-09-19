@@ -4,8 +4,6 @@
 // exposes only the operations the rest of the application needs. The pool
 // is the only place `pg.Pool` is instantiated.
 
-import { URL } from "node:url"
-
 import pg from "pg"
 
 import { AppError } from "../core/index.js"
@@ -43,7 +41,6 @@ const DEFAULT_QUERY_TIMEOUT_MS = 10_000
 
 class BoundedPool implements Pool {
   private readonly pool: pg.Pool
-  private readonly databaseUrlForErrors: string
   private readonly logger?: PoolConfig["logger"]
   private closed = false
 
@@ -64,7 +61,6 @@ class BoundedPool implements Pool {
       "queryTimeoutMs",
     )
 
-    this.databaseUrlForErrors = redactUrlPassword(config.databaseUrl)
     this.logger = config.logger
 
     this.pool = new pg.Pool({
@@ -77,12 +73,13 @@ class BoundedPool implements Pool {
     })
 
     this.pool.on("error", (error: unknown) => {
+      const errorType =
+        error instanceof Error ? error.constructor.name : typeof error
       this.logger?.error(
         JSON.stringify({
           level: "error",
-          msg: "Unexpected PostgreSQL pool error",
-          type: error instanceof Error ? error.constructor.name : typeof error,
-          databaseUrl: this.databaseUrlForErrors,
+          event: "postgresql_pool_error",
+          errorType,
         }),
       )
     })
@@ -96,9 +93,7 @@ class BoundedPool implements Pool {
     try {
       return await this.pool.query<R>(text, values)
     } catch (error: unknown) {
-      throw translatePoolError(error, {
-        databaseUrlForErrors: this.databaseUrlForErrors,
-      })
+      throw translatePoolError(error)
     }
   }
 
@@ -108,9 +103,7 @@ class BoundedPool implements Pool {
       const client = await this.pool.connect()
       return client
     } catch (error: unknown) {
-      throw translatePoolError(error, {
-        databaseUrlForErrors: this.databaseUrlForErrors,
-      })
+      throw translatePoolError(error)
     }
   }
 
@@ -158,23 +151,6 @@ function positiveIntOrDefault(
 
 export function createPool(config: PoolConfig): Pool {
   return new BoundedPool(config)
-}
-
-function redactUrlPassword(url: string): string {
-  try {
-    const parsed = new URL(url)
-    if (parsed.password) {
-      parsed.password = "***"
-    }
-    return parsed.toString()
-  } catch {
-    return "***"
-  }
-}
-
-export interface PoolErrorContext {
-  /** A redacted, log-safe database URL (password hidden) used only for diagnostics. */
-  databaseUrlForErrors: string
 }
 
 // PostgreSQL SQLSTATE codes and Node network errors that mean the database is
@@ -235,14 +211,13 @@ function isDatabaseUnavailableError(error: unknown): boolean {
   }
 
   const message = error instanceof Error ? error.message : String(error)
-  const lower = message.toLowerCase()
+  const upper = message.toUpperCase()
   if (
-    DATABASE_UNAVAILABLE_NODE_CODES.some((code) =>
-      message.toUpperCase().includes(code),
-    )
+    DATABASE_UNAVAILABLE_NODE_CODES.some((nodeCode) => upper.includes(nodeCode))
   ) {
     return true
   }
+  const lower = message.toLowerCase()
   if (
     lower.includes("password authentication failed") ||
     lower.includes("authentication failed")
@@ -262,13 +237,7 @@ function isDatabaseUnavailableError(error: unknown): boolean {
   return false
 }
 
-export function translatePoolError(
-  error: unknown,
-  // Context is retained for future diagnostics but must never be included in
-  // public error messages returned by this function.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _context: string | PoolErrorContext,
-): AppError {
+export function translatePoolError(error: unknown): AppError {
   if (error instanceof AppError) {
     return error
   }
