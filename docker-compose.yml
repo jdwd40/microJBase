@@ -1,0 +1,21 @@
+# Local PostgreSQL 16 development database.
+#
+# This service is for development and integration testing only. The
+# password below is a non-secret development placeholder; production uses
+# the process environment or a service manager secret file (see
+# ARCHITECTURE.md "Configuration").
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: microjbase
+      POSTGRES_PASSWORD: microjbase_dev_password
+      POSTGRES_DB: microjbase_dev
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-dev:/var/lib/postgresql/data
+
+volumes:
+  postgres-dev:
