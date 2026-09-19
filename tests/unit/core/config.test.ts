@@ -245,6 +245,58 @@ describe("redactSecrets", () => {
       port: 3000,
     })
   })
+
+  it("redacts passwordHash, tokenHash, bearerToken, and databaseUrl", () => {
+    const result = redactSecrets({
+      passwordHash: "HASH",
+      tokenHash: "DIGEST",
+      bearerToken: "RAW",
+      databaseUrl: "postgres://u:secret@host/db",
+    })
+
+    expect(result).toEqual({
+      passwordHash: "***",
+      tokenHash: "***",
+      bearerToken: "***",
+      databaseUrl: "***",
+    })
+  })
+
+  it("redacts snake_case variants", () => {
+    const result = redactSecrets({
+      password_hash: "HASH",
+      token_hash: "DIGEST",
+      bearer_token: "RAW",
+      access_token: "RAW2",
+      session_token: "RAW3",
+      refresh_token: "RAW4",
+      api_key: "KEY",
+      authorization: "Bearer secret",
+      cookie: "session=abc",
+      database_url: "postgres://u:secret@host/db",
+      connection_string: "postgres://u:secret@host/db",
+    })
+
+    expect(result).toEqual({
+      password_hash: "***",
+      token_hash: "***",
+      bearer_token: "***",
+      access_token: "***",
+      session_token: "***",
+      refresh_token: "***",
+      api_key: "***",
+      authorization: "***",
+      cookie: "***",
+      database_url: "***",
+      connection_string: "***",
+    })
+  })
+
+  it("redacts databaseUrl only when it is a plain URL string", () => {
+    expect(redactSecrets("postgres://u:secret@host/db")).toBe(
+      "postgres://u:***@host/db",
+    )
+  })
 })
 
 describe("redactUrlPassword", () => {

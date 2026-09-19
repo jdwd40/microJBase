@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   gracefulClose,
@@ -22,6 +22,12 @@ class FailingCloseable implements Closeable {
 class SlowCloseable implements Closeable {
   close = async (): Promise<void> => {
     await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+}
+
+class SecretFailingCloseable implements Closeable {
+  close = async (): Promise<void> => {
+    throw new Error("postgres://u:secret@host/db connection failed")
   }
 }
 
@@ -72,11 +78,41 @@ describe("installShutdownHandlers", () => {
     expect(process.listenerCount("SIGINT")).toBeGreaterThan(0)
   })
 
-  it("removes listeners when uninstall is called", () => {
+  it("removes only its own listeners when uninstalled", () => {
+    const existing = vi.fn()
+    process.on("SIGTERM", existing)
+
     uninstall = installShutdownHandlers([])
     uninstall()
 
-    expect(process.listenerCount("SIGTERM")).toBe(0)
-    expect(process.listenerCount("SIGINT")).toBe(0)
+    expect(process.listenerCount("SIGTERM")).toBe(1)
+    expect(process.listeners("SIGTERM")).toContain(existing)
+  })
+
+  it("logs a safe message when close fails with secrets", async () => {
+    const stderrSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined)
+
+    uninstall = installShutdownHandlers([new SecretFailingCloseable()], {
+      signals: ["SIGUSR2"],
+      timeoutMs: 100,
+    })
+
+    process.emit("SIGUSR2")
+
+    // Allow the async handler to run.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    const logged = stderrSpy.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" &&
+        call[0].includes("Error during graceful shutdown"),
+    )
+    expect(logged).toBeDefined()
+    expect(logged?.[0]).not.toContain("secret")
+    expect(logged?.[0]).not.toContain("postgres://")
+
+    stderrSpy.mockRestore()
   })
 })

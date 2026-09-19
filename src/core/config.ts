@@ -276,15 +276,30 @@ function parseTableTarget(target: string): { schema: string; table: string } {
   return { schema, table }
 }
 
-const REDACTED_KEYS = new Set([
-  "password",
-  "token",
-  "secret",
-  "api_key",
-  "apikey",
-  "authorization",
-  "cookie",
-])
+const SENSITIVE_KEY_PATTERNS = [
+  /^password$/,
+  /^password_?hash$/,
+  /^hash$/,
+  /^token$/,
+  /^token_?hash$/,
+  /^bearer_?token$/,
+  /^access_?token$/,
+  /^session_?token$/,
+  /^refresh_?token$/,
+  /^secret$/,
+  /^api_?key$/,
+  /^auth(orization)?$/,
+  /^cookie$/,
+  /^database_?url$/,
+  /^connection_?string$/,
+]
+
+function isSensitiveKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/_/g, "")
+  return SENSITIVE_KEY_PATTERNS.some((pattern) =>
+    pattern.test(normalized.replace(/_/g, "")),
+  )
+}
 
 export function redactSecrets(value: unknown): unknown {
   if (value === null || value === undefined) {
@@ -297,7 +312,7 @@ export function redactSecrets(value: unknown): unknown {
       const redacted = redactSecrets(parsed)
       return JSON.stringify(redacted)
     } catch {
-      return value
+      return redactStringValue(value)
     }
   }
 
@@ -309,8 +324,7 @@ export function redactSecrets(value: unknown): unknown {
     const record = value as Record<string, unknown>
     const result: Record<string, unknown> = {}
     for (const [key, val] of Object.entries(record)) {
-      const normalized = key.toLowerCase()
-      if (REDACTED_KEYS.has(normalized)) {
+      if (isSensitiveKey(key)) {
         result[key] = "***"
       } else {
         result[key] = redactSecrets(val)
@@ -319,6 +333,19 @@ export function redactSecrets(value: unknown): unknown {
     return result
   }
 
+  return value
+}
+
+function redactStringValue(value: string): string {
+  try {
+    const parsed = new URL(value)
+    if (parsed.password) {
+      parsed.password = "***"
+      return parsed.toString()
+    }
+  } catch {
+    // Not a URL; leave value unchanged.
+  }
   return value
 }
 

@@ -3,6 +3,8 @@
 // Provides graceful shutdown signal handling and typed closeables.
 // Keeps core free of feature-module dependencies.
 
+import { redactSecrets } from "./config.js"
+
 export interface Closeable {
   close(): Promise<void>
 }
@@ -20,6 +22,7 @@ export function installShutdownHandlers(
   const timeoutMs = options.timeoutMs ?? 10000
 
   let shuttingDown = false
+  const installed = new Map<NodeJS.Signals, () => void>()
 
   const handler = async (signal: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) {
@@ -29,7 +32,12 @@ export function installShutdownHandlers(
 
     const timeout = setTimeout(() => {
       console.error(
-        `Shutdown timed out after ${timeoutMs}ms (${signal}); forcing exit`,
+        JSON.stringify({
+          level: "error",
+          msg: "Shutdown timed out; forcing exit",
+          signal,
+          timeoutMs,
+        }),
       )
       process.exit(1)
     }, timeoutMs)
@@ -40,24 +48,45 @@ export function installShutdownHandlers(
       process.exitCode = 0
     } catch (error: unknown) {
       clearTimeout(timeout)
-      console.error("Error during graceful shutdown:", error)
+      const raw = error instanceof Error ? error.message : String(error)
+      const redacted = redactSecrets(raw)
+      const safeError =
+        typeof redacted === "string" ? redacted : JSON.stringify(redacted)
+      console.error(
+        JSON.stringify({
+          level: "error",
+          msg: "Error during graceful shutdown",
+          error: safeError.replaceAll("postgres://", "***"),
+        }),
+      )
       process.exitCode = 1
     }
   }
 
   for (const signal of signals) {
-    process.on(signal, () => {
+    const wrapper = (): void => {
       handler(signal).catch((error: unknown) => {
-        console.error("Unexpected shutdown handler error:", error)
+        console.error(
+          JSON.stringify({
+            level: "error",
+            msg: "Unexpected shutdown handler error",
+            error: redactSecrets(
+              error instanceof Error ? error.message : String(error),
+            ),
+          }),
+        )
         process.exit(1)
       })
-    })
+    }
+    installed.set(signal, wrapper)
+    process.on(signal, wrapper)
   }
 
   return () => {
-    for (const signal of signals) {
-      process.removeAllListeners(signal)
+    for (const [signal, wrapper] of installed) {
+      process.off(signal, wrapper)
     }
+    installed.clear()
   }
 }
 
