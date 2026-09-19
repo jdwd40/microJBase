@@ -102,6 +102,30 @@ describe("toPublicError", () => {
     expect(converted.status).toBe(500)
   })
 
+  it("rejects a success status from a shaped object", () => {
+    const bad = {
+      code: "AUTH_REQUIRED",
+      message: "oops",
+      status: 200,
+    }
+    const converted = toPublicError(bad)
+
+    expect(converted.code).toBe("INTERNAL_ERROR")
+    expect(converted.status).toBe(500)
+  })
+
+  it("rejects a client error status below 400 from a shaped object", () => {
+    const bad = {
+      code: "VALIDATION_ERROR",
+      message: "oops",
+      status: 399,
+    }
+    const converted = toPublicError(bad)
+
+    expect(converted.code).toBe("INTERNAL_ERROR")
+    expect(converted.status).toBe(500)
+  })
+
   it("rejects an unsafe status from a shaped object", () => {
     const bad = {
       code: "VALIDATION_ERROR",
@@ -120,6 +144,19 @@ describe("toPublicError", () => {
       message: "oops",
       status: 400,
       details: "leak",
+    }
+    const converted = toPublicError(bad)
+
+    expect(converted.code).toBe("INTERNAL_ERROR")
+    expect(converted.status).toBe(500)
+  })
+
+  it("rejects array details from a shaped object", () => {
+    const bad = {
+      code: "VALIDATION_ERROR",
+      message: "oops",
+      status: 400,
+      details: ["leak"],
     }
     const converted = toPublicError(bad)
 
@@ -163,5 +200,34 @@ describe("isAppError", () => {
 
   it("returns false for objects with invalid code", () => {
     expect(isAppError({ code: "NOPE", message: "x", status: 400 })).toBe(false)
+  })
+
+  it("returns false for objects with success status", () => {
+    expect(
+      isAppError({ code: "AUTH_REQUIRED", message: "x", status: 200 }),
+    ).toBe(false)
+  })
+
+  it("returns false for objects with array details", () => {
+    expect(
+      isAppError({
+        code: "VALIDATION_ERROR",
+        message: "x",
+        status: 400,
+        details: ["leak"],
+      }),
+    ).toBe(false)
+  })
+
+  it("returns false for objects with non-plain object details", () => {
+    class Custom {}
+    expect(
+      isAppError({
+        code: "VALIDATION_ERROR",
+        message: "x",
+        status: 400,
+        details: new Custom(),
+      }),
+    ).toBe(false)
   })
 })

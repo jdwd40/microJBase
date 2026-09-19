@@ -3,8 +3,6 @@
 // Provides graceful shutdown signal handling and typed closeables.
 // Keeps core free of feature-module dependencies.
 
-import { redactSecrets } from "./config.js"
-
 export interface Closeable {
   close(): Promise<void>
 }
@@ -46,17 +44,14 @@ export function installShutdownHandlers(
       await Promise.all(closeables.map((c) => c.close()))
       clearTimeout(timeout)
       process.exitCode = 0
-    } catch (error: unknown) {
+    } catch {
       clearTimeout(timeout)
-      const raw = error instanceof Error ? error.message : String(error)
-      const redacted = redactSecrets(raw)
-      const safeError =
-        typeof redacted === "string" ? redacted : JSON.stringify(redacted)
       console.error(
         JSON.stringify({
           level: "error",
           msg: "Error during graceful shutdown",
-          error: safeError.replaceAll("postgres://", "***"),
+          signal,
+          timeoutMs,
         }),
       )
       process.exitCode = 1
@@ -65,14 +60,13 @@ export function installShutdownHandlers(
 
   for (const signal of signals) {
     const wrapper = (): void => {
-      handler(signal).catch((error: unknown) => {
+      handler(signal).catch(() => {
         console.error(
           JSON.stringify({
             level: "error",
             msg: "Unexpected shutdown handler error",
-            error: redactSecrets(
-              error instanceof Error ? error.message : String(error),
-            ),
+            signal,
+            timeoutMs,
           }),
         )
         process.exit(1)

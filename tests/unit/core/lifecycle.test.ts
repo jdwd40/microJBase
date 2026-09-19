@@ -27,7 +27,7 @@ class SlowCloseable implements Closeable {
 
 class SecretFailingCloseable implements Closeable {
   close = async (): Promise<void> => {
-    throw new Error("postgres://u:secret@host/db connection failed")
+    throw new Error("bearerToken RAW_SECRET_VALUE postgres://u:secret@host/db")
   }
 }
 
@@ -89,7 +89,7 @@ describe("installShutdownHandlers", () => {
     expect(process.listeners("SIGTERM")).toContain(existing)
   })
 
-  it("logs a safe message when close fails with secrets", async () => {
+  it("logs only a generic safe message when close fails with secrets", async () => {
     const stderrSpy = vi
       .spyOn(console, "error")
       .mockImplementation(() => undefined)
@@ -110,8 +110,10 @@ describe("installShutdownHandlers", () => {
         call[0].includes("Error during graceful shutdown"),
     )
     expect(logged).toBeDefined()
-    expect(logged?.[0]).not.toContain("secret")
+    expect(logged?.[0]).not.toContain("bearerToken")
+    expect(logged?.[0]).not.toContain("RAW_SECRET_VALUE")
     expect(logged?.[0]).not.toContain("postgres://")
+    expect(logged?.[0]).not.toContain("secret")
 
     stderrSpy.mockRestore()
   })

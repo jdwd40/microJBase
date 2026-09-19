@@ -60,22 +60,17 @@ const ERROR_CODES: readonly string[] = [
 const isErrorCode = (value: unknown): value is ErrorCode =>
   typeof value === "string" && ERROR_CODES.includes(value)
 
-const isSafeStatus = (value: unknown): value is number =>
+const isClientErrorStatus = (value: unknown): value is number =>
   typeof value === "number" &&
   Number.isInteger(value) &&
-  value >= 100 &&
+  value >= 400 &&
   value <= 599
 
 const isRecord = (value: unknown): value is Record<string, unknown> => {
-  if (typeof value !== "object" || value === null) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false
   }
-  for (const key of Object.keys(value)) {
-    if (typeof key !== "string") {
-      return false
-    }
-  }
-  return true
+  return Object.getPrototypeOf(value) === Object.prototype
 }
 
 const looksLikeAppError = (error: unknown): error is AppErrorContract => {
@@ -91,7 +86,7 @@ const looksLikeAppError = (error: unknown): error is AppErrorContract => {
   if (typeof candidate["message"] !== "string") {
     return false
   }
-  if (!isSafeStatus(candidate["status"])) {
+  if (!isClientErrorStatus(candidate["status"])) {
     return false
   }
 
@@ -115,7 +110,7 @@ export function toPublicError(error: unknown): AppError {
   return new AppError("INTERNAL_ERROR", "An unexpected error occurred", 500)
 }
 
-export function isAppError(error: unknown): error is AppError {
+export function isAppError(error: unknown): error is AppErrorContract {
   if (error instanceof AppError) {
     return true
   }
