@@ -30,8 +30,16 @@ export async function registerHealthRoute(
         database: "ok",
       })
     } catch (error: unknown) {
+      // translatePoolError already distinguishes genuine database
+      // unavailability (503 DATABASE_UNAVAILABLE) from unexpected
+      // internal failures (500 INTERNAL_ERROR); honour its status.
       const publicError = translatePoolError(error)
-      return sendError(reply, 503, publicError.code, publicError.message)
+      return sendError(
+        reply,
+        publicError.status,
+        publicError.code,
+        publicError.message,
+      )
     }
   })
 }

@@ -5,7 +5,7 @@ import type { FastifyInstance } from "fastify"
 
 import { createAuthService } from "../../../src/auth/index.js"
 import { createDataService } from "../../../src/data/index.js"
-import { buildServer } from "../../../src/http/server.js"
+import { buildServer } from "../../../src/http/index.js"
 import type {
   AuthRepository,
   AuthenticatedUser,

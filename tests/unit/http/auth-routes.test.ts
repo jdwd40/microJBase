@@ -5,7 +5,7 @@ import type { FastifyInstance } from "fastify"
 
 import { createAuthService, hashTokenBytes } from "../../../src/auth/index.js"
 import { createDataService } from "../../../src/data/index.js"
-import { buildServer } from "../../../src/http/server.js"
+import { buildServer } from "../../../src/http/index.js"
 import type {
   AuthRepository,
   AuthenticatedUser,
@@ -221,6 +221,9 @@ describe("auth routes", () => {
     })
     expect(response.statusCode).toBe(400)
     expect(response.json().error.code).toBe("VALIDATION_ERROR")
+    // Regression: every auth response must carry Cache-Control: no-store,
+    // including validation errors.
+    expect(response.headers["cache-control"]).toBe("no-store")
   })
 
   it("logs in and returns 200", async () => {
@@ -266,6 +269,8 @@ describe("auth routes", () => {
       headers: { authorization: `Bearer ${token}` },
     })
     expect(logout.statusCode).toBe(204)
+    // Regression: the 204 logout response must still carry no-store.
+    expect(logout.headers["cache-control"]).toBe("no-store")
 
     const me = await app.inject({
       method: "GET",
@@ -273,6 +278,7 @@ describe("auth routes", () => {
       headers: { authorization: `Bearer ${token}` },
     })
     expect(me.statusCode).toBe(401)
+    expect(me.headers["cache-control"]).toBe("no-store")
   })
 
   it("returns 204 for logout with an unknown but validly shaped token", async () => {
@@ -317,6 +323,10 @@ describe("auth routes", () => {
     expect(missing.statusCode).toBe(401)
     expect(malformed.statusCode).toBe(401)
     expect(empty.statusCode).toBe(401)
+    // Regression: 401 auth errors must carry no-store too.
+    expect(missing.headers["cache-control"]).toBe("no-store")
+    expect(malformed.headers["cache-control"]).toBe("no-store")
+    expect(empty.headers["cache-control"]).toBe("no-store")
   })
 
   it("returns 401 for invalid token shape on logout", async () => {
@@ -357,5 +367,7 @@ describe("auth routes", () => {
     expect(blocked.statusCode).toBe(429)
     expect(blocked.headers["retry-after"]).toMatch(/^\d+$/)
     expect(blocked.json().error.code).toBe("RATE_LIMITED")
+    // Regression: 429 rate-limit errors must carry no-store.
+    expect(blocked.headers["cache-control"]).toBe("no-store")
   })
 })

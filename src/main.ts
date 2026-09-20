@@ -12,8 +12,12 @@ import { pathToFileURL } from "node:url"
 
 import type { FastifyInstance } from "fastify"
 
-import { parseConfig, safeConfigForLogging } from "./core/config.js"
-import { AppError, installShutdownHandlers } from "./core/index.js"
+import {
+  AppError,
+  installShutdownHandlers,
+  parseConfig,
+  safeConfigForLogging,
+} from "./core/index.js"
 import { createAuthService } from "./auth/index.js"
 import { createDataService } from "./data/index.js"
 import {
@@ -31,7 +35,7 @@ import {
 import {
   buildServer as buildHttpServer,
   type ServerDependencies,
-} from "./http/server.js"
+} from "./http/index.js"
 
 interface StartedServer {
   app: FastifyInstance

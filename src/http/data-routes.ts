@@ -7,7 +7,7 @@
 import type { FastifyInstance, FastifyPluginOptions } from "fastify"
 
 import type { AuthService } from "../contracts/index.js"
-import type { DataService } from "../data/service.js"
+import type { DataService } from "../data/index.js"
 
 import { extractBearerToken } from "./bearer.js"
 import { sendAppError, sendList, sendSuccess } from "./responses.js"

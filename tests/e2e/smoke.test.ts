@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import type { FastifyInstance } from "fastify"
 import type { Pool } from "../../src/database/index.js"
 
-import { buildServer } from "../../src/http/server.js"
+import { buildServer } from "../../src/http/index.js"
 import { createAuthService } from "../../src/auth/index.js"
 import { createDataService } from "../../src/data/index.js"
 

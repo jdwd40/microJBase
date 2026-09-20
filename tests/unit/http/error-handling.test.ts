@@ -5,7 +5,7 @@ import type { FastifyInstance } from "fastify"
 
 import { createAuthService } from "../../../src/auth/index.js"
 import { createDataService } from "../../../src/data/index.js"
-import { buildServer } from "../../../src/http/server.js"
+import { buildServer } from "../../../src/http/index.js"
 import type {
   AuthRepository,
   AuthenticatedUser,
@@ -156,6 +156,25 @@ class FailingPool implements Pool {
   }
 }
 
+/** A pool whose query fails with a non-database error (e.g. a bug). */
+class InternalErrorPool implements Pool {
+  async query(): Promise<never> {
+    throw new Error("unexpected non-database failure")
+  }
+
+  async connect(): Promise<never> {
+    throw new Error("unexpected non-database failure")
+  }
+
+  async close(): Promise<void> {
+    return undefined
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.close()
+  }
+}
+
 describe("error handling", () => {
   let app: FastifyInstance
 
@@ -203,6 +222,38 @@ describe("error handling", () => {
       })
       expect(response.statusCode).toBe(503)
       expect(response.json().error.code).toBe("DATABASE_UNAVAILABLE")
+    } finally {
+      await healthApp.close()
+    }
+  })
+
+  it("returns 500 INTERNAL_ERROR when the health query fails unexpectedly", async () => {
+    const healthApp = await buildServer(
+      {
+        authService: createAuthService(new FakeAuthRepository(), {
+          sessionTtlSeconds: 3600,
+          now: () => new Date("2026-01-01T00:00:00.000Z"),
+        }),
+        dataService: createDataService(
+          new FakeTableRegistry(),
+          new FakeDataRepository(),
+        ),
+        pool: new InternalErrorPool(),
+      },
+      { disableRequestLogging: true },
+    )
+
+    try {
+      const response = await healthApp.inject({
+        method: "GET",
+        url: "/health",
+      })
+      expect(response.statusCode).toBe(500)
+      expect(response.json().error.code).toBe("INTERNAL_ERROR")
+      // No raw error detail may leak into the envelope.
+      expect(JSON.stringify(response.json())).not.toContain(
+        "unexpected non-database failure",
+      )
     } finally {
       await healthApp.close()
     }

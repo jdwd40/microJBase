@@ -32,6 +32,9 @@ export async function registerAuthRoutes(
   void options
 
   app.post("/v1/auth/register", async (request, reply) => {
+    // Cache-Control: no-store must be present on every auth response,
+    // including validation and rate-limit errors.
+    sendNoCache(reply)
     try {
       const limit = deps.rateLimiter.check(`register:${request.ip}`)
       if (!limit.allowed) {
@@ -70,13 +73,16 @@ export async function registerAuthRoutes(
       }
 
       const result = await deps.authService.register({ email, password })
-      return sendSuccess(sendNoCache(reply), 201, mapAuthResult(result))
+      return sendSuccess(reply, 201, mapAuthResult(result))
     } catch (error: unknown) {
-      return sendAppError(sendNoCache(reply), error)
+      return sendAppError(reply, error)
     }
   })
 
   app.post("/v1/auth/login", async (request, reply) => {
+    // Cache-Control: no-store must be present on every auth response,
+    // including validation and rate-limit errors.
+    sendNoCache(reply)
     try {
       const limit = deps.rateLimiter.check(`login:${request.ip}`)
       if (!limit.allowed) {
@@ -115,13 +121,16 @@ export async function registerAuthRoutes(
       }
 
       const result = await deps.authService.login({ email, password })
-      return sendSuccess(sendNoCache(reply), 200, mapAuthResult(result))
+      return sendSuccess(reply, 200, mapAuthResult(result))
     } catch (error: unknown) {
-      return sendAppError(sendNoCache(reply), error)
+      return sendAppError(reply, error)
     }
   })
 
   app.post("/v1/auth/logout", async (request, reply) => {
+    // Cache-Control: no-store must be present on every auth response,
+    // including missing/malformed bearer errors and the 204 body.
+    sendNoCache(reply)
     try {
       const token = extractBearerToken(request.headers.authorization)
       if (token === null) {
@@ -132,13 +141,16 @@ export async function registerAuthRoutes(
       }
 
       await deps.authService.logout(token)
-      return sendNoCache(reply).status(204).send()
+      return reply.status(204).send()
     } catch (error: unknown) {
-      return sendAppError(sendNoCache(reply), error)
+      return sendAppError(reply, error)
     }
   })
 
   app.get("/v1/auth/me", async (request, reply) => {
+    // Cache-Control: no-store must be present on every auth response,
+    // including missing/malformed bearer errors.
+    sendNoCache(reply)
     try {
       const token = extractBearerToken(request.headers.authorization)
       if (token === null) {
@@ -149,9 +161,9 @@ export async function registerAuthRoutes(
       }
 
       const user = await deps.authService.authenticate(token)
-      return sendSuccess(sendNoCache(reply), 200, mapUser(user))
+      return sendSuccess(reply, 200, mapUser(user))
     } catch (error: unknown) {
-      return sendAppError(sendNoCache(reply), error)
+      return sendAppError(reply, error)
     }
   })
 }
