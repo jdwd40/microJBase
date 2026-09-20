@@ -28,14 +28,6 @@ const TODOS: ExposedTable = {
   ],
   insertableColumns: ["id", "title", "completed", "user_id", "meta"],
   updatableColumns: ["title", "completed", "meta"],
-  columnTypes: {
-    id: "uuid",
-    title: "text",
-    completed: "boolean",
-    user_id: "uuid",
-    meta: "jsonb",
-    created_at: "timestamptz",
-  },
 }
 
 const PROFILES: ExposedTable = {
@@ -47,11 +39,6 @@ const PROFILES: ExposedTable = {
   // id not insertable — database default only
   insertableColumns: ["display_name", "user_id"],
   updatableColumns: ["display_name"],
-  columnTypes: {
-    id: "uuid",
-    display_name: "text",
-    user_id: "uuid",
-  },
 }
 
 class FakeTableRegistry implements TableRegistry {

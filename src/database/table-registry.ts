@@ -13,7 +13,7 @@ import type { ExposedTable, TableRegistry } from "../contracts/index.js"
 import { quoteIdentifier, quoteQualifiedName } from "./identifier.js"
 import {
   type ColumnMetadata,
-  type VerifiedTableMetadata,
+  attachPrivateMetadata,
   isSupportedType,
   normalizeType,
 } from "./table-types.js"
@@ -327,17 +327,17 @@ export async function buildTableRegistry(
       )
     }
 
-    const exposedTable: VerifiedTableMetadata = {
+    const exposedTable: ExposedTable = Object.freeze({
       alias: mapping.alias,
       schema: mapping.schema,
       table: mapping.table,
       primaryKey: "id",
-      readableColumns,
-      insertableColumns,
-      updatableColumns,
-      columnTypes,
-    }
+      readableColumns: Object.freeze([...readableColumns]),
+      insertableColumns: Object.freeze([...insertableColumns]),
+      updatableColumns: Object.freeze([...updatableColumns]),
+    })
 
+    attachPrivateMetadata(exposedTable, { columnTypes })
     exposedTables.push(exposedTable)
   }
 

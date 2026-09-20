@@ -11,8 +11,6 @@ export interface ExposedTable {
   readableColumns: readonly string[]
   insertableColumns: readonly string[]
   updatableColumns: readonly string[]
-  /** Private adapter metadata: PostgreSQL type name per exposed column. */
-  columnTypes: { readonly [column: string]: string }
 }
 
 export interface TableRegistry {

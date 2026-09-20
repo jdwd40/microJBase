@@ -1,4 +1,4 @@
--- Migration 0003: representative user-owned todos table.
+-- Migration 0004: representative user-owned todos table.
 --
 -- This demonstrates the required table shape for exposed application tables:
 -- UUID primary key named `id`, user ownership, supported column types,

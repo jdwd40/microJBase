@@ -19,7 +19,11 @@ import type {
 import type { TransactionRunner } from "./transaction.js"
 import { quoteIdentifier, quoteQualifiedName } from "./identifier.js"
 import { translatePoolError } from "./pool.js"
-import { normalizeType, SUPPORTED_TYPES } from "./table-types.js"
+import {
+  getPrivateMetadata,
+  normalizeType,
+  SUPPORTED_TYPES,
+} from "./table-types.js"
 
 interface QueryContext {
   query: <R extends pg.QueryResultRow>(
@@ -28,7 +32,24 @@ interface QueryContext {
   ) => Promise<pg.QueryResult<R>>
 }
 
-function rowToJson(row: Record<string, unknown>, table: ExposedTable): DataRow {
+interface VerifiedTable {
+  table: ExposedTable
+  columnTypes: { readonly [column: string]: string }
+}
+
+function requireVerifiedMetadata(table: ExposedTable): VerifiedTable {
+  const metadata = getPrivateMetadata(table)
+  if (metadata === undefined) {
+    throw new AppError("INTERNAL_ERROR", "No verified metadata for table", 500)
+  }
+  return { table, columnTypes: metadata.columnTypes }
+}
+
+function rowToJson(
+  row: Record<string, unknown>,
+  verified: VerifiedTable,
+): DataRow {
+  const { table, columnTypes } = verified
   const result: DataRow = {}
   const allowed = new Set(table.readableColumns)
 
@@ -42,7 +63,7 @@ function rowToJson(row: Record<string, unknown>, table: ExposedTable): DataRow {
       continue
     }
 
-    const dataType = table.columnTypes[key]
+    const dataType = columnTypes[key]
     if (dataType === undefined) {
       throw new AppError(
         "INTERNAL_ERROR",
@@ -80,8 +101,12 @@ class PostgresDataRepository implements DataRepository {
     offset: number
   }): Promise<Page<DataRow>> {
     const { identity, table, limit, offset } = input
-    const quotedTable = quoteQualifiedName(table.schema, table.table)
-    const columns = table.readableColumns
+    const verified = requireVerifiedMetadata(table)
+    const quotedTable = quoteQualifiedName(
+      verified.table.schema,
+      verified.table.table,
+    )
+    const columns = verified.table.readableColumns
     const columnList =
       columns.length > 0
         ? columns.map((c) => quoteIdentifier(c)).join(", ")
@@ -99,7 +124,7 @@ class PostgresDataRepository implements DataRepository {
       )
       return {
         items: result.rows.map((row) =>
-          rowToJson(row as Record<string, unknown>, table),
+          rowToJson(row as Record<string, unknown>, verified),
         ),
         limit,
         offset,
@@ -113,8 +138,12 @@ class PostgresDataRepository implements DataRepository {
     id: string
   }): Promise<DataRow | null> {
     const { identity, table, id } = input
-    const quotedTable = quoteQualifiedName(table.schema, table.table)
-    const columns = table.readableColumns
+    const verified = requireVerifiedMetadata(table)
+    const quotedTable = quoteQualifiedName(
+      verified.table.schema,
+      verified.table.table,
+    )
+    const columns = verified.table.readableColumns
     const columnList =
       columns.length > 0
         ? columns.map((c) => quoteIdentifier(c)).join(", ")
@@ -132,7 +161,7 @@ class PostgresDataRepository implements DataRepository {
       if (result.rows.length === 0) {
         return null
       }
-      return rowToJson(result.rows[0] as Record<string, unknown>, table)
+      return rowToJson(result.rows[0] as Record<string, unknown>, verified)
     })
   }
 
@@ -142,15 +171,27 @@ class PostgresDataRepository implements DataRepository {
     values: DataRow
   }): Promise<DataRow> {
     const { identity, table, values } = input
-    assertColumnsAllowed(values, table.insertableColumns)
+    const verified = requireVerifiedMetadata(table)
+    assertColumnsAllowed(values, verified.table.insertableColumns)
 
-    const quotedTable = quoteQualifiedName(table.schema, table.table)
     const keys = Object.keys(values)
+    if (keys.length === 0) {
+      throw new AppError(
+        "VALIDATION_ERROR",
+        "No insertable values provided",
+        400,
+      )
+    }
+
+    const quotedTable = quoteQualifiedName(
+      verified.table.schema,
+      verified.table.table,
+    )
     const columns = keys.map((k) => quoteIdentifier(k)).join(", ")
     const placeholders = keys.map((_, index) => `$${index + 1}`).join(", ")
     const valueList = keys.map((k) => values[k])
 
-    const readable = table.readableColumns
+    const readable = verified.table.readableColumns
     const returning =
       readable.length > 0
         ? readable.map((c) => quoteIdentifier(c)).join(", ")
@@ -165,7 +206,7 @@ class PostgresDataRepository implements DataRepository {
         `,
         valueList,
       )
-      return rowToJson(result.rows[0] as Record<string, unknown>, table)
+      return rowToJson(result.rows[0] as Record<string, unknown>, verified)
     })
   }
 
@@ -176,7 +217,8 @@ class PostgresDataRepository implements DataRepository {
     values: DataRow
   }): Promise<DataRow | null> {
     const { identity, table, id, values } = input
-    assertColumnsAllowed(values, table.updatableColumns)
+    const verified = requireVerifiedMetadata(table)
+    assertColumnsAllowed(values, verified.table.updatableColumns)
 
     const keys = Object.keys(values)
     if (keys.length === 0) {
@@ -187,13 +229,16 @@ class PostgresDataRepository implements DataRepository {
       )
     }
 
-    const quotedTable = quoteQualifiedName(table.schema, table.table)
+    const quotedTable = quoteQualifiedName(
+      verified.table.schema,
+      verified.table.table,
+    )
     const assignments = keys
       .map((k, index) => `${quoteIdentifier(k)} = $${index + 1}`)
       .join(", ")
     const valueList = keys.map((k) => values[k])
 
-    const readable = table.readableColumns
+    const readable = verified.table.readableColumns
     const returning =
       readable.length > 0
         ? readable.map((c) => quoteIdentifier(c)).join(", ")
@@ -212,7 +257,7 @@ class PostgresDataRepository implements DataRepository {
       if (result.rows.length === 0) {
         return null
       }
-      return rowToJson(result.rows[0] as Record<string, unknown>, table)
+      return rowToJson(result.rows[0] as Record<string, unknown>, verified)
     })
   }
 
@@ -222,7 +267,11 @@ class PostgresDataRepository implements DataRepository {
     id: string
   }): Promise<boolean> {
     const { identity, table, id } = input
-    const quotedTable = quoteQualifiedName(table.schema, table.table)
+    const verified = requireVerifiedMetadata(table)
+    const quotedTable = quoteQualifiedName(
+      verified.table.schema,
+      verified.table.table,
+    )
 
     return this.withTransaction(identity, async (ctx) => {
       const result = await ctx.query(

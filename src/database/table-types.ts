@@ -140,14 +140,29 @@ export interface ColumnMetadata {
 }
 
 export interface VerifiedTableMetadata {
-  alias: string
-  schema: string
-  table: string
-  primaryKey: "id"
-  readableColumns: readonly string[]
-  insertableColumns: readonly string[]
-  updatableColumns: readonly string[]
   columnTypes: { readonly [column: string]: string }
+}
+
+// Private adapter metadata registry. ExposedTable objects returned by
+// buildTableRegistry are keyed here so CRUD methods can resolve PostgreSQL
+// type information without re-querying the catalogue and without exposing
+// adapter-specific fields in the frozen public contract.
+const privateMetadata = new WeakMap<object, VerifiedTableMetadata>()
+
+export function attachPrivateMetadata(
+  table: object,
+  metadata: VerifiedTableMetadata,
+): void {
+  privateMetadata.set(
+    table,
+    Object.freeze({ columnTypes: Object.freeze({ ...metadata.columnTypes }) }),
+  )
+}
+
+export function getPrivateMetadata(
+  table: object,
+): VerifiedTableMetadata | undefined {
+  return privateMetadata.get(table)
 }
 
 export function normalizeType(typeName: string): string {

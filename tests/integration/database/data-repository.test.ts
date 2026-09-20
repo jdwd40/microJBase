@@ -242,6 +242,46 @@ describe("data repository", () => {
       })
     })
 
+    it("rejects empty create body before SQL", async () => {
+      const t = await table()
+
+      let transactionEntered = 0
+      let queriesExecuted = 0
+      const guardedRunner = createTransactionRunner(() => pool.connect())
+      const guardedRepository = createPostgresDataRepository({
+        runner: {
+          withTransaction: async (block, options) => {
+            transactionEntered += 1
+            return guardedRunner.withTransaction(async (ctx) => {
+              const wrapped: typeof ctx = {
+                ...ctx,
+                query: async (text, values) => {
+                  queriesExecuted += 1
+                  return ctx.query(text, values)
+                },
+              }
+              return block(wrapped)
+            }, options)
+          },
+        },
+      })
+
+      await expect(
+        guardedRepository.create({
+          identity: { userId: ALICE },
+          table: t,
+          values: {},
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        status: 400,
+        message: expect.stringContaining("No insertable values provided"),
+      })
+
+      expect(transactionEntered).toBe(0)
+      expect(queriesExecuted).toBe(0)
+    })
+
     it("rejects id in update values", async () => {
       const t = await table()
       await expect(
@@ -560,7 +600,30 @@ describe("data repository", () => {
     })
   })
 
-  describe("metadata queries", () => {
+  describe("metadata privacy", () => {
+    it("returns a frozen ExposedTable with no adapter metadata own properties", async () => {
+      const t = await table()
+
+      expect(Object.isFrozen(t)).toBe(true)
+      expect(Object.isFrozen(t.readableColumns)).toBe(true)
+      expect(Object.isFrozen(t.insertableColumns)).toBe(true)
+      expect(Object.isFrozen(t.updatableColumns)).toBe(true)
+      expect(Object.prototype.hasOwnProperty.call(t, "columnTypes")).toBe(false)
+      expect("columnTypes" in t).toBe(false)
+    })
+
+    it("uses private WeakMap metadata for CRUD conversion", async () => {
+      const t = await table()
+      const row = await repository.create({
+        identity: { userId: ALICE },
+        table: t,
+        values: { title: "private metadata conversion", priority: 5 },
+      })
+      expect(row.title).toBe("private metadata conversion")
+      expect(row.priority).toBe(5)
+      expect(typeof row.created_at).toBe("string")
+    })
+
     it("does not query information_schema during a CRUD request", async () => {
       const t = await table()
       let catalogQueries = 0
@@ -607,6 +670,53 @@ describe("data repository", () => {
       })
 
       expect(catalogQueries).toBe(0)
+    })
+
+    it("fails closed when CRUD receives an unregistered ExposedTable", async () => {
+      const forged: ExposedTable = {
+        alias: "forged",
+        schema: "public",
+        table: "todos",
+        primaryKey: "id",
+        readableColumns: ["id", "title"],
+        insertableColumns: ["title"],
+        updatableColumns: ["title"],
+      }
+
+      let transactionEntered = 0
+      let queriesExecuted = 0
+      const guardedRunner = createTransactionRunner(() => pool.connect())
+      const guardedRepository = createPostgresDataRepository({
+        runner: {
+          withTransaction: async (block, options) => {
+            transactionEntered += 1
+            return guardedRunner.withTransaction(async (ctx) => {
+              const wrapped: typeof ctx = {
+                ...ctx,
+                query: async (text, values) => {
+                  queriesExecuted += 1
+                  return ctx.query(text, values)
+                },
+              }
+              return block(wrapped)
+            }, options)
+          },
+        },
+      })
+
+      await expect(
+        guardedRepository.create({
+          identity: { userId: ALICE },
+          table: forged,
+          values: { title: "x" },
+        }),
+      ).rejects.toMatchObject({
+        code: "INTERNAL_ERROR",
+        message: expect.stringContaining("No verified metadata"),
+      })
+
+      expect(transactionEntered).toBe(0)
+      expect(queriesExecuted).toBe(0)
     })
   })
 
