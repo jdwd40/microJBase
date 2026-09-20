@@ -19,16 +19,21 @@ import {
 } from "./bootstrap.js"
 import { quoteIdentifier } from "./helpers.js"
 
-const databaseUrl =
-  process.env.INTEGRATION_DATABASE_URL ??
-  "postgres://microjbase_runtime:***@127.0.0.1:5432/microjbase_dev"
+const databaseUrl = process.env.INTEGRATION_DATABASE_URL
+if (!databaseUrl) {
+  throw new Error(
+    "INTEGRATION_DATABASE_URL environment variable is required for integration tests",
+  )
+}
 
-const adminDatabaseUrl =
-  process.env.INTEGRATION_ADMIN_DATABASE_URL ??
-  process.env.MIGRATION_DATABASE_URL ??
-  "postgres://microjbase:***@127.0.0.1:5432/microjbase_dev"
+const adminDatabaseUrl = process.env.INTEGRATION_ADMIN_DATABASE_URL
+if (!adminDatabaseUrl) {
+  throw new Error(
+    "INTEGRATION_ADMIN_DATABASE_URL environment variable is required for integration tests",
+  )
+}
 
-const runtimeRoleName = new URL(databaseUrl).username
+const runtimeRoleName: string = new URL(databaseUrl).username
 
 const ALICE = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
 const BOB = "b0eebc99-9c0b-4ef8-bb6d-6bb9bd380b22"
@@ -36,7 +41,7 @@ const BOB = "b0eebc99-9c0b-4ef8-bb6d-6bb9bd380b22"
 async function withAdminClient<T>(
   fn: (client: pg.Client) => Promise<T>,
 ): Promise<T> {
-  return withClient(adminDatabaseUrl, fn)
+  return withClient(adminDatabaseUrl as string, fn)
 }
 
 let pool: Pool
@@ -55,6 +60,7 @@ describe("data repository", () => {
     })
     pool = createPool({ databaseUrl, maxConnections: 2 })
     const runner = createTransactionRunner(() => pool.connect())
+
     repository = createPostgresDataRepository({ runner })
   })
 
@@ -279,6 +285,28 @@ describe("data repository", () => {
       await withAdminClient(async (admin) => {
         await admin.query("DROP INDEX IF EXISTS tmp_todos_title")
       })
+    })
+
+    it("classifies errors by SQLSTATE, not message text", async () => {
+      // Spoof an error whose message text looks like a unique violation but
+      // whose SQLSTATE is a generic data exception. It must not be classified
+      // as a CONFLICT based on the message wording.
+      const fakeError = Object.assign(new Error("duplicate key value"), {
+        code: "22023", // invalid_parameter_value — a Class 22 data exception
+      })
+
+      const { translateDataError } =
+        await import("../../../src/database/data-repository.js")
+      const translated = translateDataError(fakeError)
+      expect(translated.code).not.toBe("CONFLICT")
+
+      // And a real unique violation with an unusual message still maps to
+      // CONFLICT because its SQLSTATE is 23505.
+      const realUnique = Object.assign(new Error("any message at all"), {
+        code: "23505",
+      })
+      const realTranslated = translateDataError(realUnique)
+      expect(realTranslated.code).toBe("CONFLICT")
     })
   })
 
@@ -529,6 +557,56 @@ describe("data repository", () => {
           (r: Record<string, unknown>) => r.title === "bob parallel",
         ),
       ).toBe(true)
+    })
+  })
+
+  describe("metadata queries", () => {
+    it("does not query information_schema during a CRUD request", async () => {
+      const t = await table()
+      let catalogQueries = 0
+
+      // Wrap the runner so we can count catalogue queries.
+      const runner = createTransactionRunner(() => pool.connect())
+      const countingRepository = createPostgresDataRepository({
+        runner: {
+          withTransaction: async (block, options) => {
+            return runner.withTransaction(async (ctx) => {
+              const wrapped: typeof ctx = {
+                ...ctx,
+                query: async (text, values) => {
+                  if (
+                    text.includes("information_schema") ||
+                    text.includes("pg_catalog")
+                  ) {
+                    catalogQueries += 1
+                  }
+                  return ctx.query(text, values)
+                },
+              }
+              return block(wrapped)
+            }, options)
+          },
+        },
+      })
+
+      await countingRepository.create({
+        identity: { userId: ALICE },
+        table: t,
+        values: { title: "no catalog" },
+      })
+      await countingRepository.list({
+        identity: { userId: ALICE },
+        table: t,
+        limit: 10,
+        offset: 0,
+      })
+      await countingRepository.findById({
+        identity: { userId: ALICE },
+        table: t,
+        id: "c0eebc99-9c0b-4ef8-bb6d-6bb9bd380c33",
+      })
+
+      expect(catalogQueries).toBe(0)
     })
   })
 

@@ -19,6 +19,7 @@ import type {
 import type { TransactionRunner } from "./transaction.js"
 import { quoteIdentifier, quoteQualifiedName } from "./identifier.js"
 import { translatePoolError } from "./pool.js"
+import { normalizeType, SUPPORTED_TYPES } from "./table-types.js"
 
 interface QueryContext {
   query: <R extends pg.QueryResultRow>(
@@ -27,154 +28,27 @@ interface QueryContext {
   ) => Promise<pg.QueryResult<R>>
 }
 
-const SUPPORTED_TYPES = new Map<
-  string,
-  (value: unknown) => JsonPrimitive | JsonObject | JsonArray
->([
-  ["uuid", asString],
-  ["text", asString],
-  ["varchar", asString],
-  ["character varying", asString],
-  ["char", asString],
-  ["character", asString],
-  ["boolean", asBoolean],
-  ["bool", asBoolean],
-  ["smallint", asNumber],
-  ["integer", asNumber],
-  ["int", asNumber],
-  ["int4", asNumber],
-  ["real", asNumber],
-  ["float4", asNumber],
-  ["double precision", asNumber],
-  ["float8", asNumber],
-  ["bigint", asString],
-  ["int8", asString],
-  ["numeric", asString],
-  ["decimal", asString],
-  ["date", asIsoString],
-  ["timestamp without time zone", asIsoString],
-  ["timestamp", asIsoString],
-  ["timestamp with time zone", asIsoString],
-  ["timestamptz", asIsoString],
-  ["json", asJson],
-  ["jsonb", asJson],
-])
-
-type JsonPrimitive = string | number | boolean | null
-type JsonObject = { [key: string]: JsonValue }
-type JsonArray = JsonValue[]
-type JsonValue = JsonPrimitive | JsonObject | JsonArray
-
-function asString(value: unknown): string {
-  if (value === null) return ""
-  if (typeof value === "string") return value
-  if (value instanceof Date) return value.toISOString()
-  return String(value)
-}
-
-function asBoolean(value: unknown): boolean {
-  if (typeof value === "boolean") return value
-  if (value === null) return false
-  if (typeof value === "number") return value !== 0
-  if (typeof value === "string") return value.toLowerCase() === "true"
-  return Boolean(value)
-}
-
-function asNumber(value: unknown): number {
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new AppError(
-        "CONFLICT",
-        "Database value cannot be represented as a finite number",
-        409,
-      )
-    }
-    return value
-  }
-  if (value === null) return 0
-  if (typeof value === "string") {
-    const parsed = Number(value)
-    if (!Number.isFinite(parsed)) {
-      throw new AppError(
-        "CONFLICT",
-        "Database value cannot be represented as a finite number",
-        409,
-      )
-    }
-    return parsed
-  }
-  throw new AppError(
-    "CONFLICT",
-    "Database value cannot be represented as a finite number",
-    409,
-  )
-}
-
-function asIsoString(value: unknown): string {
-  if (value instanceof Date) return value.toISOString()
-  if (typeof value === "string") return value
-  if (value === null) return ""
-  return String(value)
-}
-
-function asJson(value: unknown): JsonValue {
-  if (value === null) return null
-  if (
-    typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "boolean"
-  ) {
-    return value as JsonValue
-  }
-  if (typeof value === "object") {
-    if (Buffer.isBuffer(value) || value instanceof Date) {
-      throw new AppError(
-        "CONFLICT",
-        "Database value cannot be represented as JSON",
-        409,
-      )
-    }
-    if (Array.isArray(value)) {
-      return value.map((item) => asJson(item))
-    }
-    const result: JsonObject = {}
-    for (const [key, val] of Object.entries(value)) {
-      result[key] = asJson(val)
-    }
-    return result
-  }
-  throw new AppError(
-    "CONFLICT",
-    "Database value cannot be represented as JSON",
-    409,
-  )
-}
-
-function normalizeType(typeName: string): string {
-  const lower = typeName.toLowerCase().trim()
-  if (lower === "character varying") return "varchar"
-  if (lower === "timestamp without time zone") return "timestamp"
-  if (lower === "timestamp with time zone") return "timestamptz"
-  return lower
-}
-
-function rowToJson(
-  row: Record<string, unknown>,
-  typeByColumn: Map<string, string>,
-): DataRow {
+function rowToJson(row: Record<string, unknown>, table: ExposedTable): DataRow {
   const result: DataRow = {}
+  const allowed = new Set(table.readableColumns)
 
   for (const [key, value] of Object.entries(row)) {
-    const dataType = typeByColumn.get(key)
-    if (dataType === undefined) {
-      // Column was returned unexpectedly; exclude rather than leak an
-      // unsupported type.
+    if (!allowed.has(key)) {
       continue
     }
 
     if (value === null) {
       result[key] = null
       continue
+    }
+
+    const dataType = table.columnTypes[key]
+    if (dataType === undefined) {
+      throw new AppError(
+        "INTERNAL_ERROR",
+        `No type metadata for column ${key}`,
+        500,
+      )
     }
 
     const converter = SUPPORTED_TYPES.get(normalizeType(dataType))
@@ -186,7 +60,7 @@ function rowToJson(
       )
     }
 
-    result[key] = converter(value) as JsonValue
+    result[key] = converter(value)
   }
 
   return result
@@ -213,18 +87,19 @@ class PostgresDataRepository implements DataRepository {
         ? columns.map((c) => quoteIdentifier(c)).join(", ")
         : "NULL"
 
-    return this.withTransaction(table, identity, async (ctx) => {
-      const text = `
-        SELECT ${columnList}
-        FROM ${quotedTable}
-        ORDER BY ${quoteIdentifier("id")} ASC
-        LIMIT $1 OFFSET $2
-      `
-      const result = await ctx.query(text, [limit, offset])
-      const typeByColumn = await this.fetchColumnTypes(ctx, table)
+    return this.withTransaction(identity, async (ctx) => {
+      const result = await ctx.query(
+        `
+          SELECT ${columnList}
+          FROM ${quotedTable}
+          ORDER BY ${quoteIdentifier("id")} ASC
+          LIMIT $1 OFFSET $2
+        `,
+        [limit, offset],
+      )
       return {
         items: result.rows.map((row) =>
-          rowToJson(row as Record<string, unknown>, typeByColumn),
+          rowToJson(row as Record<string, unknown>, table),
         ),
         limit,
         offset,
@@ -245,7 +120,7 @@ class PostgresDataRepository implements DataRepository {
         ? columns.map((c) => quoteIdentifier(c)).join(", ")
         : "NULL"
 
-    return this.withTransaction(table, identity, async (ctx) => {
+    return this.withTransaction(identity, async (ctx) => {
       const result = await ctx.query(
         `
           SELECT ${columnList}
@@ -257,8 +132,7 @@ class PostgresDataRepository implements DataRepository {
       if (result.rows.length === 0) {
         return null
       }
-      const typeByColumn = await this.fetchColumnTypes(ctx, table)
-      return rowToJson(result.rows[0] as Record<string, unknown>, typeByColumn)
+      return rowToJson(result.rows[0] as Record<string, unknown>, table)
     })
   }
 
@@ -282,7 +156,7 @@ class PostgresDataRepository implements DataRepository {
         ? readable.map((c) => quoteIdentifier(c)).join(", ")
         : "NULL"
 
-    return this.withTransaction(table, identity, async (ctx) => {
+    return this.withTransaction(identity, async (ctx) => {
       const result = await ctx.query(
         `
           INSERT INTO ${quotedTable} (${columns})
@@ -291,8 +165,7 @@ class PostgresDataRepository implements DataRepository {
         `,
         valueList,
       )
-      const typeByColumn = await this.fetchColumnTypes(ctx, table)
-      return rowToJson(result.rows[0] as Record<string, unknown>, typeByColumn)
+      return rowToJson(result.rows[0] as Record<string, unknown>, table)
     })
   }
 
@@ -326,7 +199,7 @@ class PostgresDataRepository implements DataRepository {
         ? readable.map((c) => quoteIdentifier(c)).join(", ")
         : "NULL"
 
-    return this.withTransaction(table, identity, async (ctx) => {
+    return this.withTransaction(identity, async (ctx) => {
       const result = await ctx.query(
         `
           UPDATE ${quotedTable}
@@ -339,8 +212,7 @@ class PostgresDataRepository implements DataRepository {
       if (result.rows.length === 0) {
         return null
       }
-      const typeByColumn = await this.fetchColumnTypes(ctx, table)
-      return rowToJson(result.rows[0] as Record<string, unknown>, typeByColumn)
+      return rowToJson(result.rows[0] as Record<string, unknown>, table)
     })
   }
 
@@ -352,7 +224,7 @@ class PostgresDataRepository implements DataRepository {
     const { identity, table, id } = input
     const quotedTable = quoteQualifiedName(table.schema, table.table)
 
-    return this.withTransaction(table, identity, async (ctx) => {
+    return this.withTransaction(identity, async (ctx) => {
       const result = await ctx.query(
         `
           DELETE FROM ${quotedTable}
@@ -365,7 +237,6 @@ class PostgresDataRepository implements DataRepository {
   }
 
   private async withTransaction<T>(
-    table: ExposedTable,
     identity: RequestIdentity,
     block: (ctx: QueryContext) => Promise<T>,
   ): Promise<T> {
@@ -379,28 +250,6 @@ class PostgresDataRepository implements DataRepository {
       },
       { userId: identity.userId },
     )
-  }
-
-  private async fetchColumnTypes(
-    ctx: QueryContext,
-    table: ExposedTable,
-  ): Promise<Map<string, string>> {
-    const result = await ctx.query<{
-      column_name: string
-      data_type: string
-    }>(
-      `
-        SELECT column_name, data_type
-        FROM information_schema.columns
-        WHERE table_schema = $1 AND table_name = $2
-      `,
-      [table.schema, table.table],
-    )
-    const map = new Map<string, string>()
-    for (const row of result.rows) {
-      map.set(row.column_name, normalizeType(row.data_type))
-    }
-    return map
   }
 }
 
@@ -425,43 +274,55 @@ function assertColumnsAllowed(
   }
 }
 
+const PG_INTEGRITY_CONSTRAINT_VIOLATION = "23500"
+const PG_NOT_NULL_VIOLATION = "23502"
+const PG_FOREIGN_KEY_VIOLATION = "23503"
+const PG_UNIQUE_VIOLATION = "23505"
+const PG_CHECK_VIOLATION = "23514"
+const PG_EXCLUSION_VIOLATION = "23P01"
+const PG_INVALID_TEXT_REPRESENTATION = "22P02"
+const PG_NUMERIC_VALUE_OUT_OF_RANGE = "22003"
+const PG_INVALID_DATETIME_FORMAT = "22007"
+
+function isPostgresError(error: unknown): error is Record<string, unknown> {
+  return typeof error === "object" && error !== null
+}
+
+function getPostgresCode(error: unknown): string | null {
+  if (!isPostgresError(error)) return null
+  const code = error["code"]
+  if (typeof code === "string") return code
+  return null
+}
+
 export function translateDataError(error: unknown): AppError {
   if (error instanceof AppError) {
     return error
   }
 
-  const message = error instanceof Error ? error.message : String(error)
-  const lower = message.toLowerCase()
+  const code = getPostgresCode(error)
 
-  // Class 23 — integrity constraint violation.
-  if (lower.includes("unique constraint") || lower.includes("duplicate key")) {
-    return new AppError("CONFLICT", "A conflict occurred", 409)
+  if (code === null) {
+    return translatePoolError(error)
   }
 
-  if (
-    lower.includes("foreign key constraint") ||
-    lower.includes("violates foreign key")
-  ) {
-    return new AppError("CONFLICT", "A conflict occurred", 409)
+  switch (code) {
+    case PG_UNIQUE_VIOLATION:
+    case PG_EXCLUSION_VIOLATION:
+      return new AppError("CONFLICT", "A conflict occurred", 409)
+    case PG_FOREIGN_KEY_VIOLATION:
+      return new AppError("CONFLICT", "A conflict occurred", 409)
+    case PG_CHECK_VIOLATION:
+    case PG_NOT_NULL_VIOLATION:
+    case PG_INTEGRITY_CONSTRAINT_VIOLATION:
+      return new AppError("CONFLICT", "A conflict occurred", 409)
+    case PG_INVALID_TEXT_REPRESENTATION:
+    case PG_NUMERIC_VALUE_OUT_OF_RANGE:
+    case PG_INVALID_DATETIME_FORMAT:
+      return new AppError("CONFLICT", "A conflict occurred", 409)
+    default:
+      return translatePoolError(error)
   }
-
-  if (
-    lower.includes("check constraint") ||
-    lower.includes("violates check constraint")
-  ) {
-    return new AppError("CONFLICT", "A conflict occurred", 409)
-  }
-
-  if (lower.includes("not null")) {
-    return new AppError("CONFLICT", "A conflict occurred", 409)
-  }
-
-  // Class 22 — data exception.
-  if (lower.includes("invalid input syntax")) {
-    return new AppError("CONFLICT", "A conflict occurred", 409)
-  }
-
-  return translatePoolError(error)
 }
 
 export function createPostgresDataRepository(

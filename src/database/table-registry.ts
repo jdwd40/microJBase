@@ -11,6 +11,12 @@ import { AppError } from "../core/index.js"
 import type { ExposedTable, TableRegistry } from "../contracts/index.js"
 
 import { quoteIdentifier, quoteQualifiedName } from "./identifier.js"
+import {
+  type ColumnMetadata,
+  type VerifiedTableMetadata,
+  isSupportedType,
+  normalizeType,
+} from "./table-types.js"
 
 export { type ExposedTable, type TableRegistry }
 
@@ -31,16 +37,6 @@ export interface RegistryBuildDependencies {
   ) => Promise<pg.QueryResult<R>>
 }
 
-interface ColumnMeta {
-  name: string
-  dataType: string
-  isNullable: boolean
-  isGenerated: boolean
-  isIdentity: boolean
-  hasDefault: boolean
-  isUpdatable: boolean
-}
-
 interface TableVerification {
   schema: string
   table: string
@@ -48,47 +44,9 @@ interface TableVerification {
   hasForceRls: boolean
   applicablePolicy: boolean
   primaryKey: { column: string; dataType: string } | null
-  columns: readonly ColumnMeta[]
-  privileges: {
-    hasSelect: boolean
-    hasInsert: boolean
-    hasUpdate: boolean
-    hasDelete: boolean
-  }
+  columns: readonly ColumnMetadata[]
+  hasDelete: boolean
 }
-
-const SUPPORTED_TYPES = new Map<
-  string,
-  "string" | "number" | "boolean" | "json" | "timestamp"
->([
-  ["uuid", "string"],
-  ["text", "string"],
-  ["varchar", "string"],
-  ["character varying", "string"],
-  ["char", "string"],
-  ["character", "string"],
-  ["boolean", "boolean"],
-  ["bool", "boolean"],
-  ["smallint", "number"],
-  ["integer", "number"],
-  ["int", "number"],
-  ["int4", "number"],
-  ["real", "number"],
-  ["float4", "number"],
-  ["double precision", "number"],
-  ["float8", "number"],
-  ["bigint", "string"],
-  ["int8", "string"],
-  ["numeric", "string"],
-  ["decimal", "string"],
-  ["date", "timestamp"],
-  ["timestamp without time zone", "timestamp"],
-  ["timestamp", "timestamp"],
-  ["timestamp with time zone", "timestamp"],
-  ["timestamptz", "timestamp"],
-  ["json", "json"],
-  ["jsonb", "json"],
-])
 
 const ALIAS_PATTERN = /^[a-z][a-z0-9_]{0,62}$/
 const IDENTIFIER_PATTERN = /^[a-z_][a-z0-9_]*$/i
@@ -293,30 +251,33 @@ export async function buildTableRegistry(
       )
     }
 
+    if (!verified.hasDelete) {
+      throw new AppError(
+        "DATABASE_UNAVAILABLE",
+        `Runtime role cannot delete from ${mapping.schema}.${mapping.table}`,
+        503,
+        { alias: mapping.alias, schema: mapping.schema, table: mapping.table },
+      )
+    }
+
     const readableColumns: string[] = []
     const insertableColumns: string[] = []
     const updatableColumns: string[] = []
+    const columnTypes: Record<string, string> = {}
 
     for (const column of verified.columns) {
-      if (!SUPPORTED_TYPES.has(column.dataType)) {
-        continue
-      }
+      columnTypes[column.name] = column.dataType
 
-      if (verified.privileges.hasSelect) {
+      if (column.hasSelect) {
         readableColumns.push(column.name)
       }
 
-      if (
-        verified.privileges.hasInsert &&
-        column.name !== "id" &&
-        !column.isGenerated &&
-        !column.isIdentity
-      ) {
+      if (column.hasInsert && !column.isGenerated && !column.isIdentity) {
         insertableColumns.push(column.name)
       }
 
       if (
-        verified.privileges.hasUpdate &&
+        column.hasUpdate &&
         column.name !== "id" &&
         !column.isGenerated &&
         !column.isIdentity
@@ -343,6 +304,20 @@ export async function buildTableRegistry(
       )
     }
 
+    // The contract exposes a single deleteById operation; a table without a
+    // DELETE privilege would always fail at runtime, so fail closed at startup.
+    if (!verified.hasDelete) {
+      throw new AppError(
+        "DATABASE_UNAVAILABLE",
+        `Runtime role cannot delete from ${mapping.schema}.${mapping.table}`,
+        503,
+        { alias: mapping.alias, schema: mapping.schema, table: mapping.table },
+      )
+    }
+
+    // Updatable columns may legitimately be empty if the operator only exposes
+    // INSERT/SELECT/DELETE, but the frozen DataRepository contract exposes
+    // updateById. Fail closed so the mismatch is visible at startup.
     if (updatableColumns.length === 0) {
       throw new AppError(
         "DATABASE_UNAVAILABLE",
@@ -352,7 +327,7 @@ export async function buildTableRegistry(
       )
     }
 
-    exposedTables.push({
+    const exposedTable: VerifiedTableMetadata = {
       alias: mapping.alias,
       schema: mapping.schema,
       table: mapping.table,
@@ -360,7 +335,10 @@ export async function buildTableRegistry(
       readableColumns,
       insertableColumns,
       updatableColumns,
-    })
+      columnTypes,
+    }
+
+    exposedTables.push(exposedTable)
   }
 
   return new VerifiedTableRegistry(exposedTables)
@@ -382,6 +360,20 @@ async function verifyTable(
   mapping: ExposedTableMapping,
 ): Promise<TableVerification> {
   const { schema, table } = mapping
+
+  const schemaUsageResult = await query<{ has: boolean }>(
+    "SELECT has_schema_privilege(current_user, $1, 'USAGE') AS has",
+    [schema],
+  )
+  const schemaUsageRow = schemaUsageResult.rows[0]
+  if (schemaUsageRow === undefined || !schemaUsageRow.has) {
+    throw new AppError(
+      "DATABASE_UNAVAILABLE",
+      `Runtime role is missing USAGE privilege on schema ${schema}`,
+      503,
+      { alias: mapping.alias, schema, table },
+    )
+  }
 
   const existsResult = await query<{ exists: boolean }>(
     `SELECT EXISTS (
@@ -422,24 +414,15 @@ async function verifyTable(
     )
   }
 
-  const privilegeResult = await query<{
-    has_select: boolean
-    has_insert: boolean
-    has_update: boolean
-    has_delete: boolean
-  }>(
-    `SELECT
-       has_table_privilege(current_user, $1, 'SELECT') AS has_select,
-       has_table_privilege(current_user, $1, 'INSERT') AS has_insert,
-       has_table_privilege(current_user, $1, 'UPDATE') AS has_update,
-       has_table_privilege(current_user, $1, 'DELETE') AS has_delete`,
+  const deleteResult = await query<{ has: boolean }>(
+    "SELECT has_table_privilege(current_user, $1, 'DELETE') AS has",
     [`${schema}.${table}`],
   )
-  const privilegeRow = privilegeResult.rows[0]
-  if (privilegeRow === undefined) {
+  const deleteRow = deleteResult.rows[0]
+  if (deleteRow === undefined) {
     throw new AppError(
       "DATABASE_UNAVAILABLE",
-      `Could not determine privileges on ${schema}.${table}`,
+      `Could not determine DELETE privilege on ${schema}.${table}`,
       503,
       { alias: mapping.alias, schema, table },
     )
@@ -504,22 +487,53 @@ async function verifyTable(
     [schema, table],
   )
 
-  const columns: ColumnMeta[] = columnsResult.rows
-    .filter(
-      (row) =>
-        SUPPORTED_TYPES.has(normalizeType(row.data_type)) &&
-        row.is_generated === "NEVER" &&
-        row.is_identity === "NO",
-    )
-    .map((row) => ({
-      name: row.column_name,
-      dataType: normalizeType(row.data_type),
-      isNullable: row.is_nullable === "YES",
-      isGenerated: false,
-      isIdentity: false,
-      hasDefault: row.column_default !== null,
-      isUpdatable: true,
-    }))
+  const columnPrivileges = await query<{
+    column_name: string
+    has_select: boolean
+    has_insert: boolean
+    has_update: boolean
+  }>(
+    `SELECT a.attname AS column_name,
+            has_column_privilege(current_user, c.oid, a.attnum, 'SELECT') AS has_select,
+            has_column_privilege(current_user, c.oid, a.attnum, 'INSERT') AS has_insert,
+            has_column_privilege(current_user, c.oid, a.attnum, 'UPDATE') AS has_update
+     FROM pg_attribute a
+     JOIN pg_class c ON c.oid = a.attrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = $1 AND c.relname = $2
+       AND a.attnum > 0 AND NOT a.attisdropped
+     ORDER BY a.attnum`,
+    [schema, table],
+  )
+  const privilegesByColumn = new Map(
+    columnPrivileges.rows.map((row) => [
+      row.column_name,
+      {
+        hasSelect: row.has_select,
+        hasInsert: row.has_insert,
+        hasUpdate: row.has_update,
+      },
+    ]),
+  )
+
+  const columns: ColumnMetadata[] = columnsResult.rows
+    .filter((row) => isSupportedType(row.data_type))
+    .map((row) => {
+      const privileges = privilegesByColumn.get(row.column_name) ?? {
+        hasSelect: false,
+        hasInsert: false,
+        hasUpdate: false,
+      }
+      return {
+        name: row.column_name,
+        dataType: normalizeType(row.data_type),
+        isNullable: row.is_nullable === "YES",
+        isGenerated: row.is_generated !== "NEVER",
+        isIdentity: row.is_identity === "YES",
+        hasDefault: row.column_default !== null,
+        ...privileges,
+      }
+    })
 
   return {
     schema,
@@ -529,21 +543,8 @@ async function verifyTable(
     applicablePolicy,
     primaryKey,
     columns,
-    privileges: {
-      hasSelect: privilegeRow.has_select,
-      hasInsert: privilegeRow.has_insert,
-      hasUpdate: privilegeRow.has_update,
-      hasDelete: privilegeRow.has_delete,
-    },
+    hasDelete: deleteRow.has,
   }
-}
-
-function normalizeType(typeName: string): string {
-  const lower = typeName.toLowerCase().trim()
-  if (lower === "character varying") return "varchar"
-  if (lower === "timestamp without time zone") return "timestamp"
-  if (lower === "timestamp with time zone") return "timestamptz"
-  return lower
 }
 
 export function quoteTableIdentifier(schema: string, table: string): string {

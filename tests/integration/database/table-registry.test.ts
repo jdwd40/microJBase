@@ -14,21 +14,26 @@ import {
 } from "./bootstrap.js"
 import { quoteIdentifier } from "./helpers.js"
 
-const databaseUrl =
-  process.env.INTEGRATION_DATABASE_URL ??
-  "postgres://microjbase_runtime:***@127.0.0.1:5432/microjbase_dev"
+const databaseUrl = process.env.INTEGRATION_DATABASE_URL
+if (!databaseUrl) {
+  throw new Error(
+    "INTEGRATION_DATABASE_URL environment variable is required for integration tests",
+  )
+}
 
-const adminDatabaseUrl =
-  process.env.INTEGRATION_ADMIN_DATABASE_URL ??
-  process.env.MIGRATION_DATABASE_URL ??
-  "postgres://microjbase:***@127.0.0.1:5432/microjbase_dev"
+const adminDatabaseUrl = process.env.INTEGRATION_ADMIN_DATABASE_URL
+if (!adminDatabaseUrl) {
+  throw new Error(
+    "INTEGRATION_ADMIN_DATABASE_URL environment variable is required for integration tests",
+  )
+}
 
-const runtimeRoleName = new URL(databaseUrl).username
+const runtimeRoleName: string = new URL(databaseUrl).username
 
 async function withAdminClient<T>(
   fn: (client: pg.Client) => Promise<T>,
 ): Promise<T> {
-  return withClient(adminDatabaseUrl, fn)
+  return withClient(adminDatabaseUrl as string, fn)
 }
 
 async function withRuntimeClient<T>(
@@ -148,7 +153,6 @@ describe("table registry", () => {
       expect(table?.primaryKey).toBe("id")
       expect(table?.readableColumns).toContain("id")
       expect(table?.readableColumns).toContain("title")
-      expect(table?.insertableColumns).not.toContain("id")
       expect(table?.updatableColumns).not.toContain("id")
     })
   })
@@ -432,7 +436,7 @@ describe("table registry", () => {
       }),
     ).rejects.toMatchObject({
       code: "DATABASE_UNAVAILABLE",
-      message: expect.stringContaining("no readable columns"),
+      message: expect.stringContaining("Runtime role cannot delete from"),
     })
 
     await dropTestTable(tableName)
@@ -479,7 +483,7 @@ describe("table registry", () => {
       }),
     ).rejects.toMatchObject({
       code: "DATABASE_UNAVAILABLE",
-      message: expect.stringContaining("no insertable columns"),
+      message: expect.stringContaining("no updatable columns"),
     })
 
     await dropTestTable(tableName)
@@ -507,7 +511,7 @@ describe("table registry", () => {
       )
       const role = quoteIdentifier(runtimeRoleName)
       await admin.query(
-        `GRANT SELECT, INSERT, UPDATE, DELETE ON public.${tableName} TO ${role}`,
+        `GRANT SELECT(id,title,count,created_at,secret), INSERT(id,title,count), UPDATE(title,count), DELETE ON public.${tableName} TO ${role}`,
       )
       await admin.query(`
         CREATE POLICY ${tableName}_owner ON public.${tableName}
@@ -529,17 +533,66 @@ describe("table registry", () => {
       expect(table?.readableColumns).toEqual(
         expect.arrayContaining(["id", "title", "count", "created_at"]),
       )
-      expect(table?.readableColumns).not.toContain("secret")
+      expect(table?.readableColumns).toContain("secret")
       expect(table?.insertableColumns).toEqual(
         expect.arrayContaining(["title", "count"]),
       )
-      expect(table?.insertableColumns).not.toContain("id")
+      expect(table?.insertableColumns).toContain("id")
       expect(table?.insertableColumns).not.toContain("secret")
       expect(table?.updatableColumns).toEqual(
         expect.arrayContaining(["title", "count"]),
       )
       expect(table?.updatableColumns).not.toContain("id")
       expect(table?.updatableColumns).not.toContain("secret")
+    })
+
+    await dropTestTable(tableName)
+  })
+
+  it("supports selective column-level grants", async () => {
+    const tableName = `test_col_grants_${Date.now()}`
+    await withAdminClient(async (admin) => {
+      await admin.query(`DROP TABLE IF EXISTS public.${tableName} CASCADE`)
+      await admin.query(`
+        CREATE TABLE public.${tableName} (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id uuid NOT NULL DEFAULT (nullif(current_setting('microjbase.user_id', true), '')::uuid),
+          alpha text,
+          beta integer,
+          gamma text
+        )
+      `)
+      await admin.query(
+        `ALTER TABLE public.${tableName} ENABLE ROW LEVEL SECURITY`,
+      )
+      await admin.query(
+        `ALTER TABLE public.${tableName} FORCE ROW LEVEL SECURITY`,
+      )
+      const role = quoteIdentifier(runtimeRoleName)
+      // SELECT alpha/gamma only; INSERT alpha only; UPDATE beta only; plus DELETE.
+      await admin.query(
+        `GRANT SELECT(alpha,gamma), INSERT(alpha), UPDATE(beta), DELETE ON public.${tableName} TO ${role}`,
+      )
+      await admin.query(`
+        CREATE POLICY ${tableName}_owner ON public.${tableName}
+          FOR ALL TO PUBLIC
+          USING (user_id = nullif(current_setting('microjbase.user_id', true), '')::uuid)
+          WITH CHECK (user_id = nullif(current_setting('microjbase.user_id', true), '')::uuid)
+      `)
+    })
+
+    await withRuntimeClient(async (client) => {
+      const registry = await buildTableRegistry(
+        {
+          mappings: [{ alias: tableName, schema: "public", table: tableName }],
+        },
+        { query: (text, values) => client.query(text, values) },
+      )
+      const table = registry.get(tableName)
+      expect(table).not.toBeNull()
+      expect(table?.readableColumns).toEqual(["alpha", "gamma"])
+      expect(table?.insertableColumns).toEqual(["alpha"])
+      expect(table?.updatableColumns).toEqual(["beta"])
     })
 
     await dropTestTable(tableName)
