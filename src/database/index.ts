@@ -28,3 +28,21 @@ export {
   type RuntimeTableSafety,
 } from "./role-safety.js"
 export { createAuthRepository } from "./auth-repository.js"
+export {
+  createPostgresDataRepository,
+  translateDataError,
+  type PostgresDataRepositoryDependencies,
+} from "./data-repository.js"
+export {
+  buildTableRegistry,
+  buildTableRegistryFromEnv,
+  quoteIdentifier,
+  quoteTableIdentifier,
+  type ExposedTableMapping,
+  type TableRegistryConfig,
+  type RegistryBuildDependencies,
+} from "./table-registry.js"
+export {
+  type ColumnMetadata,
+  type VerifiedTableMetadata,
+} from "./table-types.js"
