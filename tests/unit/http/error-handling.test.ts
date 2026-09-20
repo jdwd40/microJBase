@@ -285,6 +285,73 @@ describe("error handling", () => {
     expect(response.json().error.code).toBe("VALIDATION_ERROR")
   })
 
+  it("returns 400 with no-store for malformed JSON on an auth route (pre-route failure)", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      headers: { "content-type": "application/json" },
+      payload: "{not json",
+    })
+    expect(response.statusCode).toBe(400)
+    expect(response.json().error.code).toBe("VALIDATION_ERROR")
+    expect(response.headers["cache-control"]).toBe("no-store")
+  })
+
+  it("returns 413 with no-store for an oversized auth body (pre-route failure)", async () => {
+    const huge = "x".repeat(2_000_000)
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({
+        email: `${huge}@example.com`,
+        password: huge,
+      }),
+    })
+    expect(response.statusCode).toBe(413)
+    expect(response.json().error.code).toBe("VALIDATION_ERROR")
+    expect(response.headers["cache-control"]).toBe("no-store")
+  })
+
+  it("returns 400 with no-store for an empty JSON body on an auth route (pre-route failure)", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      headers: { "content-type": "application/json" },
+      payload: "",
+    })
+    expect(response.statusCode).toBe(400)
+    expect(response.json().error.code).toBe("VALIDATION_ERROR")
+    expect(response.headers["cache-control"]).toBe("no-store")
+  })
+
+  it("returns 500 INTERNAL_ERROR for unmapped Fastify errors such as 415", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      payload: "email=a@example.com&password=secretsecret",
+    })
+    expect(response.statusCode).toBe(500)
+    expect(response.json().error.code).toBe("INTERNAL_ERROR")
+    // Fastify's raw message must not leak into the public envelope.
+    expect(JSON.stringify(response.json())).not.toContain("Unsupported Media")
+  })
+
+  it("does not set no-store on non-auth pre-route failures", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/data/items",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer testtoken",
+      },
+      payload: "{not json",
+    })
+    expect(response.statusCode).toBe(400)
+    expect(response.headers["cache-control"]).toBeUndefined()
+  })
+
   it("returns 404 envelope for unknown routes", async () => {
     const response = await app.inject({
       method: "GET",

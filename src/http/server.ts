@@ -40,6 +40,11 @@ export interface ServerDependencies {
   pool?: Pool
 }
 
+/** True for request paths under /v1/auth/ (and the bare /v1/auth prefix). */
+function isAuthPath(url: string): boolean {
+  return url === "/v1/auth" || url.startsWith("/v1/auth/")
+}
+
 export async function buildServer(
   deps: ServerDependencies,
   config: ServerConfig = {},
@@ -58,8 +63,14 @@ export async function buildServer(
 
   const app = Fastify(opts)
 
-  app.addHook("onSend", async (_request, reply, payload) => {
+  app.addHook("onSend", async (request, reply, payload) => {
     reply.header("x-request-id", reply.request.id)
+    // api-spec requires Cache-Control: no-store on every auth response,
+    // including Fastify pre-route failures (malformed JSON, oversized or
+    // empty bodies) that never reach the auth route handlers' sendNoCache.
+    if (isAuthPath(request.url)) {
+      reply.header("cache-control", "no-store")
+    }
     return payload
   })
 
@@ -105,7 +116,10 @@ export async function buildServer(
       })
     }
 
-    return reply.status(error.statusCode ?? 500).send({
+    // Unmapped Fastify errors (e.g. 415 unsupported media type) must not
+    // leak Fastify's status or message into the public envelope; unexpected
+    // failures are always 500 INTERNAL_ERROR.
+    return reply.status(500).send({
       data: null,
       error: {
         code: "INTERNAL_ERROR",
