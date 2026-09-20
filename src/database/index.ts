@@ -27,3 +27,4 @@ export {
   type PolicyCheck,
   type RuntimeTableSafety,
 } from "./role-safety.js"
+export { createAuthRepository } from "./auth-repository.js"
