@@ -57,7 +57,10 @@ describe("transaction helper", () => {
         await ctx.query(`INSERT INTO ${quoteIdentifier(tempTable)} VALUES (1)`)
         throw new Error("boom")
       }),
-    ).rejects.toThrow("boom")
+    ).rejects.toMatchObject({
+      code: "INTERNAL_ERROR",
+      message: "An unexpected database error occurred",
+    })
 
     const result = await pool.query<{ count: number }>(
       `SELECT COUNT(*)::int AS count FROM ${quoteIdentifier(tempTable)}`,
@@ -109,7 +112,10 @@ describe("transaction helper", () => {
         },
         { userId },
       ),
-    ).rejects.toThrow("deliberate")
+    ).rejects.toMatchObject({
+      code: "INTERNAL_ERROR",
+      message: "An unexpected database error occurred",
+    })
 
     const leaked = await runner.withTransaction(async (ctx) => {
       const rs = await ctx.query<{ value: string | null }>(
@@ -136,7 +142,7 @@ describe("transaction helper", () => {
     expect(caught).toBeDefined()
     expect(caught).toMatchObject({
       code: "INTERNAL_ERROR",
-      message: "Transaction failed and was rolled back",
+      message: "An unexpected database error occurred",
     })
 
     const serialized = JSON.stringify(caught)
@@ -168,5 +174,33 @@ describe("transaction helper", () => {
       message: "Email is already registered",
       status: 409,
     })
+  })
+
+  it("maps database-unavailable SQLSTATE codes to DATABASE_UNAVAILABLE after rollback", async () => {
+    // Simulate a query-cancelled (statement timeout) error inside a transaction.
+    // This is a representative DATABASE_UNAVAILABLE code (57014) that must not
+    // become a generic INTERNAL_ERROR.
+    let caught: unknown
+    try {
+      await runner.withTransaction(async () => {
+        const error = Object.assign(
+          new Error("canceling statement due to statement timeout"),
+          {
+            code: "57014",
+          },
+        )
+        throw error
+      })
+    } catch (error: unknown) {
+      caught = error
+    }
+
+    expect(caught).toMatchObject({
+      code: "DATABASE_UNAVAILABLE",
+    })
+
+    // Connection must remain usable after rollback.
+    const result = await pool.query<{ one: number }>("SELECT 1 AS one")
+    expect(result.rows).toEqual([{ one: 1 }])
   })
 })

@@ -10,6 +10,7 @@ import type pg from "pg"
 
 import { AppError } from "../core/index.js"
 import type { UserId } from "../contracts/index.js"
+import { translatePoolError } from "./pool.js"
 
 export interface TransactionContext {
   client: pg.PoolClient
@@ -73,23 +74,10 @@ class PooledTransactionRunner implements TransactionRunner {
             ? rollbackError
             : new Error(String(rollbackError)),
         )
-        throw translateTransactionError(rollbackError)
+        throw translatePoolError(rollbackError)
       }
       release()
-      if (error instanceof AppError) {
-        throw error
-      }
-      // Non-domain JavaScript errors are re-thrown so callers still see
-      // application-level exceptions (e.g. validation errors from repository
-      // code) after a successful rollback. Raw PostgreSQL errors are still
-      // translated above when they are the original error.
-      if (
-        error instanceof Error &&
-        !(isPgError(error) || isConnectionError(error))
-      ) {
-        throw error
-      }
-      throw translateTransactionError(error)
+      throw translatePoolError(error)
     }
   }
 }
@@ -101,42 +89,5 @@ export function createTransactionRunner(
 }
 
 export function translateTransactionError(error: unknown): AppError {
-  if (error instanceof AppError) {
-    return error
-  }
-
-  const message = error instanceof Error ? error.message : String(error)
-
-  if (
-    message.includes("current transaction is aborted") ||
-    (message.includes("relation") && message.includes("does not exist"))
-  ) {
-    return new AppError(
-      "INTERNAL_ERROR",
-      "Transaction failed and was rolled back",
-      500,
-    )
-  }
-
-  return new AppError(
-    "INTERNAL_ERROR",
-    "An unexpected database error occurred",
-    500,
-  )
-}
-
-function isPgError(error: Error): boolean {
-  return (
-    "code" in error &&
-    typeof (error as Record<string, unknown>).code === "string"
-  )
-}
-
-function isConnectionError(error: Error): boolean {
-  const message = error.message.toLowerCase()
-  return (
-    message.includes("connection") ||
-    message.includes("timeout") ||
-    message.includes("refused")
-  )
+  return translatePoolError(error)
 }
