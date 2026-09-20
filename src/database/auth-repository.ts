@@ -2,8 +2,8 @@
 //
 // Implements the frozen AuthRepository port against microjbase.users and
 // microjbase.sessions. Registration inserts the user and initial session in
-// one transaction (no microjbase.user_id). Unique-email conflicts become
-// EMAIL_ALREADY_REGISTERED; raw PostgreSQL details never cross the port.
+// one transaction (no microjbase.user_id). Only users_email_key conflicts
+// become EMAIL_ALREADY_REGISTERED; raw PostgreSQL details never cross the port.
 
 import type {
   AuthenticatedUser,
@@ -69,11 +69,13 @@ function mapSession(row: SessionRow): Session {
   }
 }
 
-function isPgUniqueViolation(error: unknown): boolean {
+/** Map only the users.email UNIQUE constraint to EMAIL_ALREADY_REGISTERED. */
+function isUsersEmailUniqueViolation(error: unknown): boolean {
   if (typeof error !== "object" || error === null) {
     return false
   }
-  return (error as { code?: unknown }).code === "23505"
+  const e = error as { code?: unknown; constraint?: unknown; table?: unknown }
+  return e.code === "23505" && e.constraint === "users_email_key"
 }
 
 class PostgresAuthRepository implements AuthRepository {
@@ -101,9 +103,11 @@ class PostgresAuthRepository implements AuthRepository {
         )
         userRow = userResult.rows[0]
       } catch (error: unknown) {
-        // Translate unique-email conflicts before translatePoolError would
-        // wrap them as INTERNAL_ERROR. AppError is passed through unchanged.
-        if (isPgUniqueViolation(error)) {
+        // Translate users_email_key only. Other 23505s (and all other PG
+        // errors) are rethrown so withTransaction's translatePoolError maps
+        // them to INTERNAL_ERROR / DATABASE_UNAVAILABLE without leaking
+        // constraint names or SQLSTATE onto AppError.
+        if (isUsersEmailUniqueViolation(error)) {
           throw new AppError(
             "EMAIL_ALREADY_REGISTERED",
             "Email already registered",
@@ -180,17 +184,14 @@ class PostgresAuthRepository implements AuthRepository {
     tokenHash: Buffer,
     now: Date,
   ): Promise<AuthenticatedUser | null> {
-    // token_hash is indexed but not UNIQUE in migration 0002. Prefer the
-    // newest matching active session when duplicates exist (should not).
+    // token_hash is UNIQUE (migration 0003); at most one matching row.
     const result = await this.pool.query<AuthenticatedUserRow>(
       `SELECT u.id, u.email
        FROM microjbase.sessions s
        INNER JOIN microjbase.users u ON u.id = s.user_id
        WHERE s.token_hash = $1
          AND s.revoked_at IS NULL
-         AND s.expires_at > $2
-       ORDER BY s.created_at DESC
-       LIMIT 1`,
+         AND s.expires_at > $2`,
       [tokenHash, now],
     )
     const row = result.rows[0]

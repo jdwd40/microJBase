@@ -120,6 +120,20 @@ describe("AuthRepository PostgreSQL adapter", () => {
       await client.query(
         `ALTER TABLE microjbase.sessions DROP CONSTRAINT IF EXISTS sessions_fail_insert`,
       )
+      // Disposable unique index used by unrelated-23505 classification test.
+      await client.query(
+        `DROP INDEX IF EXISTS microjbase.users_password_hash_unique_probe`,
+      )
+      // Identity-probe triggers/functions from microjbase.user_id regression.
+      await client.query(
+        `DROP TRIGGER IF EXISTS trg_reject_user_id_on_users ON microjbase.users`,
+      )
+      await client.query(
+        `DROP TRIGGER IF EXISTS trg_reject_user_id_on_sessions ON microjbase.sessions`,
+      )
+      await client.query(
+        `DROP FUNCTION IF EXISTS microjbase.reject_if_user_id_set()`,
+      )
     })
   })
 
@@ -496,5 +510,204 @@ describe("AuthRepository PostgreSQL adapter", () => {
     expect(serialized).not.toContain("23505")
     expect(serialized).not.toContain("users_email")
     expect(serialized).not.toMatch(/duplicate key|unique constraint/i)
+  })
+
+  it("does not map an unrelated 23505 to EMAIL_ALREADY_REGISTERED", async () => {
+    // Disposable UNIQUE on password_hash so two different emails with the
+    // same passwordHash collide on a non-email constraint.
+    await withClient(adminDatabaseUrl, async (client) => {
+      await client.query(
+        `CREATE UNIQUE INDEX users_password_hash_unique_probe
+         ON microjbase.users (password_hash)`,
+      )
+    })
+
+    const sharedPasswordHash = "shared-password-hash-for-unrelated-23505"
+    const firstHash = tokenHash("unrelated-23505-first-hash-uuuu")
+    const secondHash = tokenHash("unrelated-23505-second-hash-vvvv")
+
+    try {
+      await repo.createUserAndSession({
+        email: "unrelated-a@example.com",
+        passwordHash: sharedPasswordHash,
+        tokenHash: firstHash,
+        expiresAt: futureExpiry(),
+      })
+
+      let caught: unknown
+      try {
+        await repo.createUserAndSession({
+          email: "unrelated-b@example.com",
+          passwordHash: sharedPasswordHash,
+          tokenHash: secondHash,
+          expiresAt: futureExpiry(),
+        })
+      } catch (error: unknown) {
+        caught = error
+      }
+
+      expect(caught).toBeInstanceOf(AppError)
+      expect(caught).toMatchObject({
+        code: "INTERNAL_ERROR",
+        message: "An unexpected database error occurred",
+        status: 500,
+      })
+      expect(caught).not.toMatchObject({ code: "EMAIL_ALREADY_REGISTERED" })
+
+      const serialized = JSON.stringify(
+        caught,
+        Object.getOwnPropertyNames(caught as object),
+      )
+      expect(serialized).not.toContain("23505")
+      expect(serialized).not.toContain("users_password_hash_unique_probe")
+      expect(serialized).not.toContain("users_email_key")
+      expect(serialized).not.toContain(sharedPasswordHash)
+      expect(serialized).not.toMatch(
+        /duplicate key|unique constraint|password_hash/i,
+      )
+      assertSecretsAbsent(caught, sharedPasswordHash, firstHash, secondHash)
+
+      expect(
+        await countUsers(adminDatabaseUrl, "unrelated-a@example.com"),
+      ).toBe(1)
+      expect(
+        await countUsers(adminDatabaseUrl, "unrelated-b@example.com"),
+      ).toBe(0)
+    } finally {
+      await withClient(adminDatabaseUrl, async (client) => {
+        await client.query(
+          `DROP INDEX IF EXISTS microjbase.users_password_hash_unique_probe`,
+        )
+      })
+    }
+  })
+
+  it("enforces UNIQUE token_hash at the database (duplicate session rejected)", async () => {
+    const hashX = tokenHash("unique-token-hash-xxxxxxxxxxxxxxxx")
+    const { user, session } = await repo.createUserAndSession({
+      email: "tokuniq@example.com",
+      passwordHash: "phash-tokuniq",
+      tokenHash: hashX,
+      expiresAt: futureExpiry(),
+    })
+
+    let caught: unknown
+    try {
+      await repo.createSession({
+        userId: user.id,
+        tokenHash: hashX,
+        expiresAt: futureExpiry(),
+      })
+    } catch (error: unknown) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(AppError)
+    expect(caught).toMatchObject({
+      code: "INTERNAL_ERROR",
+      message: "An unexpected database error occurred",
+      status: 500,
+    })
+    const serialized = JSON.stringify(
+      caught,
+      Object.getOwnPropertyNames(caught as object),
+    )
+    expect(serialized).not.toContain("23505")
+    expect(serialized).not.toContain("sessions_token_hash_key")
+    expect(serialized).not.toMatch(/duplicate key|unique constraint/i)
+    assertSecretsAbsent(caught, hashX)
+
+    // First session intact; findActive still returns original user.
+    const authenticated = await repo.findActiveUserByTokenHash(
+      hashX,
+      new Date(),
+    )
+    expect(authenticated).toEqual({ id: user.id, email: "tokuniq@example.com" })
+
+    // Prove second row does not exist.
+    const countForHash = await withClient(adminDatabaseUrl, async (client) => {
+      const rs = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM microjbase.sessions WHERE token_hash = $1`,
+        [hashX],
+      )
+      return Number(rs.rows[0]?.count ?? 0)
+    })
+    expect(countForHash).toBe(1)
+    expect(await countSessions(adminDatabaseUrl, user.id)).toBe(1)
+
+    // Revoke hash X once; only one session affected.
+    const revoked = await repo.revokeByTokenHash(hashX, new Date())
+    expect(revoked).toBe(true)
+    expect(await repo.findActiveUserByTokenHash(hashX, new Date())).toBeNull()
+
+    const revokedRow = await withClient(adminDatabaseUrl, async (client) => {
+      const rs = await client.query<{ id: string; revoked_at: Date | null }>(
+        `SELECT id, revoked_at FROM microjbase.sessions WHERE token_hash = $1`,
+        [hashX],
+      )
+      return rs.rows
+    })
+    expect(revokedRow).toHaveLength(1)
+    expect(revokedRow[0]?.id).toBe(session.id)
+    expect(revokedRow[0]?.revoked_at).toBeInstanceOf(Date)
+  })
+
+  it("does not set microjbase.user_id during createUserAndSession", async () => {
+    // BEFORE INSERT triggers raise if microjbase.user_id is set. If
+    // createUserAndSession succeeds, identity was absent on both inserts.
+    await withClient(adminDatabaseUrl, async (client) => {
+      await client.query(`
+        CREATE OR REPLACE FUNCTION microjbase.reject_if_user_id_set()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF nullif(current_setting('microjbase.user_id', true), '') IS NOT NULL THEN
+            RAISE EXCEPTION 'microjbase.user_id was set during auth registration';
+          END IF;
+          RETURN NEW;
+        END;
+        $$;
+      `)
+      await client.query(`
+        CREATE TRIGGER trg_reject_user_id_on_users
+          BEFORE INSERT ON microjbase.users
+          FOR EACH ROW
+          EXECUTE FUNCTION microjbase.reject_if_user_id_set();
+      `)
+      await client.query(`
+        CREATE TRIGGER trg_reject_user_id_on_sessions
+          BEFORE INSERT ON microjbase.sessions
+          FOR EACH ROW
+          EXECUTE FUNCTION microjbase.reject_if_user_id_set();
+      `)
+    })
+
+    try {
+      const { user, session } = await repo.createUserAndSession({
+        email: "noidentity@example.com",
+        passwordHash: "phash-noidentity",
+        tokenHash: tokenHash("noidentity-token-hash-wwwwwwww"),
+        expiresAt: futureExpiry(),
+      })
+      expect(user.email).toBe("noidentity@example.com")
+      expect(session.userId).toBe(user.id)
+      expect(await countUsers(adminDatabaseUrl, "noidentity@example.com")).toBe(
+        1,
+      )
+      expect(await countSessions(adminDatabaseUrl, user.id)).toBe(1)
+    } finally {
+      await withClient(adminDatabaseUrl, async (client) => {
+        await client.query(
+          `DROP TRIGGER IF EXISTS trg_reject_user_id_on_users ON microjbase.users`,
+        )
+        await client.query(
+          `DROP TRIGGER IF EXISTS trg_reject_user_id_on_sessions ON microjbase.sessions`,
+        )
+        await client.query(
+          `DROP FUNCTION IF EXISTS microjbase.reject_if_user_id_set()`,
+        )
+      })
+    }
   })
 })
