@@ -149,6 +149,54 @@ describe("e2e proof of life", () => {
     expect(stored.rows[0]?.title).toBe("buy oat milk")
   })
 
+  it("rejects a foreign ownership claim on create with 409 and creates no row", async () => {
+    const forged = await ctx.api.post(
+      "/v1/data/todos",
+      { title: "forged", user_id: bob.userId },
+      alice.token,
+    )
+    expectError(forged, 409, "CONFLICT")
+    // Exactly the generic conflict envelope — nothing about the attempt.
+    expect(publicError(forged)).toEqual({
+      code: "CONFLICT",
+      message: "A conflict occurred",
+    })
+
+    // No foreign row was created, and none under Alice's identity either.
+    const bobRows = await adminQuery<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM public.todos WHERE user_id = $1",
+      [bob.userId],
+    )
+    expect(bobRows.rows[0]?.count).toBe("0")
+    const forgedRows = await adminQuery<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM public.todos WHERE title = $1",
+      ["forged"],
+    )
+    expect(forgedRows.rows[0]?.count).toBe("0")
+  })
+
+  it("rejects an ownership transfer via PATCH with 409 and keeps the owner", async () => {
+    const transfer = await ctx.api.patch(
+      `/v1/data/todos/${todoId}`,
+      { user_id: bob.userId },
+      alice.token,
+    )
+    expectError(transfer, 409, "CONFLICT")
+    expect(publicError(transfer)).toEqual({
+      code: "CONFLICT",
+      message: "A conflict occurred",
+    })
+
+    // Ownership is unchanged and Bob still cannot see the row.
+    const stored = await adminQuery<{ user_id: string }>(
+      "SELECT user_id FROM public.todos WHERE id = $1",
+      [todoId],
+    )
+    expect(stored.rows[0]?.user_id).toBe(alice.userId)
+    const bobGet = await ctx.api.get(`/v1/data/todos/${todoId}`, bob.token)
+    expectError(bobGet, 404, "ROW_NOT_FOUND")
+  })
+
   it("keeps Alice fully functional and able to delete her own todo", async () => {
     const fetched = await ctx.api.get(`/v1/data/todos/${todoId}`, alice.token)
     expect(fetched.status).toBe(200)

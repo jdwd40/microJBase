@@ -52,6 +52,28 @@ export interface DataService {
   }): Promise<void>
 }
 
+// Documented ownership convention for user-owned tables (see
+// docs/database-spec.md "Recommended user-owned table"): the ownership column
+// is named `user_id` and defaults to the transaction-local authenticated
+// identity. When a client explicitly supplies this column, the value must
+// name the caller — a foreign claim is rejected before SQL with the same
+// generic public conflict the database would produce. PostgreSQL RLS remains
+// the final enforcement boundary; this check only keeps rejected claims from
+// ever reaching the database.
+const OWNERSHIP_COLUMN = "user_id"
+
+function assertNoForeignOwnershipClaim(
+  values: DataRow,
+  identity: RequestIdentity,
+): void {
+  if (
+    Object.prototype.hasOwnProperty.call(values, OWNERSHIP_COLUMN) &&
+    values[OWNERSHIP_COLUMN] !== identity.userId
+  ) {
+    throw new DataError("CONFLICT", "A conflict occurred", 409)
+  }
+}
+
 export class DataServiceImpl implements DataService {
   constructor(
     private readonly registry: TableRegistry,
@@ -122,6 +144,8 @@ export class DataServiceImpl implements DataService {
       }
     }
 
+    assertNoForeignOwnershipClaim(values, input.identity)
+
     // Pass only the validated JSON values object; do not invent columns.
     return this.repository.create({
       identity: input.identity,
@@ -150,6 +174,8 @@ export class DataServiceImpl implements DataService {
     }
 
     assertKeysAllowed(values, table.updatableColumns, "updatable")
+
+    assertNoForeignOwnershipClaim(values, input.identity)
 
     const row = await this.repository.updateById({
       identity: input.identity,

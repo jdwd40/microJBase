@@ -4,6 +4,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
+import { adminQuery } from "./helpers/database.js"
 import {
   expectError,
   expectNoStore,
@@ -178,5 +179,25 @@ describe("e2e auth acceptance", () => {
       authorization: "not-a-bearer-token",
     })
     expectError(bareToken, 401, "AUTH_REQUIRED")
+  })
+
+  it("rejects a data route with no Authorization header and performs no write", async () => {
+    const before = await adminQuery<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM public.todos",
+    )
+
+    // No Authorization header at all — not an empty, malformed, or unknown one.
+    const response = await ctx.api.send(
+      "POST",
+      "/v1/data/todos",
+      JSON.stringify({ title: "unauthenticated write" }),
+      { "content-type": "application/json" },
+    )
+    expectError(response, 401, "AUTH_REQUIRED")
+
+    const after = await adminQuery<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM public.todos",
+    )
+    expect(after.rows[0]?.count).toBe(before.rows[0]?.count)
   })
 })

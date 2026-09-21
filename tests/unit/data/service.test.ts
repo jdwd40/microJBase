@@ -41,6 +41,29 @@ const PROFILES: ExposedTable = {
   updatableColumns: ["display_name"],
 }
 
+// Table whose ownership column is also updatable (as the runtime role's
+// table-level UPDATE grant makes it in the real registry).
+const NOTES: ExposedTable = {
+  alias: "notes",
+  schema: "public",
+  table: "notes",
+  primaryKey: "id",
+  readableColumns: ["id", "title", "user_id"],
+  insertableColumns: ["title", "user_id"],
+  updatableColumns: ["title", "user_id"],
+}
+
+// Table with no ownership column at all.
+const SETTINGS: ExposedTable = {
+  alias: "settings",
+  schema: "public",
+  table: "settings",
+  primaryKey: "id",
+  readableColumns: ["id", "theme"],
+  insertableColumns: ["theme"],
+  updatableColumns: ["theme"],
+}
+
 class FakeTableRegistry implements TableRegistry {
   private readonly tables: Map<string, ExposedTable>
 
@@ -171,7 +194,7 @@ const BOB: RequestIdentity = {
 }
 
 function build() {
-  const registry = new FakeTableRegistry([TODOS, PROFILES])
+  const registry = new FakeTableRegistry([TODOS, PROFILES, NOTES, SETTINGS])
   const repository = new FakeDataRepository()
   const service = createDataService(registry, repository)
   return { service, repository, registry }
@@ -195,6 +218,28 @@ function buildWithWriteSpies() {
     ...built,
     createCalls: () => createCalls,
     updateCalls: () => updateCalls,
+  }
+}
+
+/** Spies that capture the exact values reaching the repository. */
+function buildWithWriteCapture() {
+  const built = build()
+  let createdValues: DataRow | null = null
+  let updatedValues: DataRow | null = null
+  const originalCreate = built.repository.create.bind(built.repository)
+  const originalUpdate = built.repository.updateById.bind(built.repository)
+  built.repository.create = async (input) => {
+    createdValues = input.values
+    return originalCreate(input)
+  }
+  built.repository.updateById = async (input) => {
+    updatedValues = input.values
+    return originalUpdate(input)
+  }
+  return {
+    ...built,
+    createdValues: () => createdValues,
+    updatedValues: () => updatedValues,
   }
 }
 
@@ -636,6 +681,123 @@ describe("DataService", () => {
         code: "VALIDATION_ERROR",
         status: 400,
       })
+    })
+  })
+
+  describe("ownership binding", () => {
+    it("rejects a foreign user_id claim on create before any repository call", async () => {
+      const { service, createCalls } = buildWithWriteSpies()
+      await expect(
+        service.create({
+          identity: ALICE,
+          tableAlias: "todos",
+          values: { title: "claim", user_id: BOB.userId },
+        }),
+      ).rejects.toMatchObject({
+        code: "CONFLICT",
+        status: 409,
+        message: "A conflict occurred",
+      })
+      expect(createCalls()).toBe(0)
+    })
+
+    it("rejects a foreign user_id claim on update before any repository call", async () => {
+      const { service, repository, updateCalls } = buildWithWriteSpies()
+      const id = "11111111-1111-1111-1111-111111111111"
+      repository.seed("notes", ALICE.userId, {
+        id,
+        title: "Mine",
+        user_id: ALICE.userId,
+      })
+      await expect(
+        service.update({
+          identity: ALICE,
+          tableAlias: "notes",
+          id,
+          values: { user_id: BOB.userId },
+        }),
+      ).rejects.toMatchObject({
+        code: "CONFLICT",
+        status: 409,
+        message: "A conflict occurred",
+      })
+      expect(updateCalls()).toBe(0)
+    })
+
+    it("rejects any non-identity user_id value, not just other users' ids", async () => {
+      const { service, createCalls } = buildWithWriteSpies()
+      await expect(
+        service.create({
+          identity: ALICE,
+          tableAlias: "todos",
+          values: { title: "claim", user_id: "not-a-user-id" },
+        }),
+      ).rejects.toMatchObject({
+        code: "CONFLICT",
+        status: 409,
+      })
+      expect(createCalls()).toBe(0)
+    })
+
+    it("lets a client name their own user_id on create", async () => {
+      const { service, createdValues } = buildWithWriteCapture()
+      const row = await service.create({
+        identity: ALICE,
+        tableAlias: "todos",
+        values: { title: "mine", user_id: ALICE.userId },
+      })
+      expect(row["title"]).toBe("mine")
+      expect(createdValues()?.["user_id"]).toBe(ALICE.userId)
+    })
+
+    it("lets a client re-assert their own user_id on update when updatable", async () => {
+      const { service, repository, updatedValues } = buildWithWriteCapture()
+      const id = "11111111-1111-1111-1111-111111111111"
+      repository.seed("notes", ALICE.userId, {
+        id,
+        title: "Mine",
+        user_id: ALICE.userId,
+      })
+      const row = await service.update({
+        identity: ALICE,
+        tableAlias: "notes",
+        id,
+        values: { title: "still mine", user_id: ALICE.userId },
+      })
+      expect(row["title"]).toBe("still mine")
+      expect(updatedValues()?.["user_id"]).toBe(ALICE.userId)
+    })
+
+    it("does not invent a user_id for tables without an ownership column", async () => {
+      const { service, createdValues } = buildWithWriteCapture()
+      await service.create({
+        identity: ALICE,
+        tableAlias: "settings",
+        values: { theme: "dark" },
+      })
+      expect(createdValues()).not.toBeNull()
+      expect(
+        Object.prototype.hasOwnProperty.call(createdValues() ?? {}, "user_id"),
+      ).toBe(false)
+    })
+
+    it("emits the conflict without field details so nothing about the attempt leaks", async () => {
+      const { service } = build()
+      try {
+        await service.create({
+          identity: ALICE,
+          tableAlias: "todos",
+          values: { title: "claim", user_id: BOB.userId },
+        })
+        expect.unreachable("should throw")
+      } catch (error: unknown) {
+        expect(error).toBeInstanceOf(DataError)
+        const err = error as DataError
+        expect(err.code).toBe("CONFLICT")
+        expect(err.status).toBe(409)
+        expect(err.message).toBe("A conflict occurred")
+        expect(err.details).toBeUndefined()
+      }
     })
   })
 
