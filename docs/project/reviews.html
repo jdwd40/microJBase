@@ -27,6 +27,32 @@
     <main id="main">
       <div class="wrap">
         <h2>Latest v0.2 review</h2>
+        <p class="muted">
+          Last updated:
+          <time datetime="2026-09-21T20:39:47Z">2026-09-21 20:39 UTC</time>.
+        </p>
+        <section class="panel" aria-labelledby="review-pr26">
+          <h3 id="review-pr26">PR #26 — V02-01 schema catalogue reader</h3>
+          <p>
+            Purpose: add dependency-free schema catalogue contracts and a
+            read-only PostgreSQL reader for schemas, regular/partitioned tables,
+            columns, type identity, defaults, owners, and RLS flags.
+          </p>
+          <p>
+            Grok 4.6 first returned DO NOT SHIP with 2 MAJOR and 5 MINOR
+            findings. Kimi corrected PostgreSQL 18 virtual generated columns,
+            one-statement snapshot semantics, fail-closed mapping, partition and
+            no-mutation coverage, and permanent contracts in
+            <code>e2b5eb8</code>. A second review left one planner-order MINOR;
+            Kimi replaced it with a <code>MATERIALIZED</code> pin CTE and a real
+            <code>LATERAL</code> dependency in <code>6c277f0</code>. Final
+            review at
+            <time datetime="2026-09-21T20:39:47Z">2026-09-21 20:39 UTC</time>
+            returned <strong>SHIP</strong> with 0 blockers, 0 majors, and 0
+            minors. CI passed 36 files / 386 tests.
+          </p>
+        </section>
+
         <section class="panel" aria-labelledby="review-pr25">
           <h3 id="review-pr25">PR #25 — V02-00 foundation</h3>
           <p>
@@ -251,7 +277,8 @@
     <footer class="site">
       <div class="wrap">
         Static wiki: relative links only, no external assets, no JavaScript.
-        Rendered from the repository working tree at v0.2 intake.
+        Last updated
+        <time datetime="2026-09-21T20:39:47Z">2026-09-21 20:39 UTC</time>.
       </div>
     </footer>
   </body>

@@ -71,17 +71,25 @@
         </div>
 
         <h2>Current work</h2>
+        <p class="muted">
+          Last updated:
+          <time datetime="2026-09-21T20:39:47Z">2026-09-21 20:39 UTC</time>.
+        </p>
         <p>
           <span class="badge done">completed</span>
           <strong>V02-00 — Direction, queue, and project wiki</strong> merged as
-          PR #25. Progress is 1 of 20 v0.2 items merged (5%).
+          PR #25 at
+          <time datetime="2026-09-21T18:30:13Z">2026-09-21 18:30 UTC</time>.
+          Progress is 1 of 20 v0.2 items merged (5%).
         </p>
         <p>
-          <span class="badge queued">next</span>
+          <span class="badge progress">approved</span>
           <strong
             >V02-01 — Schema catalogue contracts and table/column reader</strong
           >
-          begins Wave 1 with read-only PostgreSQL introspection. It adds no HTTP
+          passed final Grok 4.6 review in PR #26 at
+          <time datetime="2026-09-21T20:39:47Z">2026-09-21 20:39 UTC</time>. CI
+          is green at 36 files / 386 tests; merge is pending. It adds no HTTP
           routes or DDL.
         </p>
         <p>
@@ -93,18 +101,18 @@
 
         <h2>Latest review</h2>
         <p>
-          Grok 4.6 reviewed PR #25 twice. The first pass found one MAJOR gap in
-          the schema-admin ownership/GRANT model and eight MINOR documentation
-          issues. Kimi corrected them in <code>0a075e3</code>. The re-review
-          returned <strong>SHIP</strong> with 0 blockers, 0 unresolved majors,
-          and one non-blocking wording minor, which was corrected before merge.
-          Full chronology: <a href="reviews.html">reviews page</a>.
+          Grok 4.6 reviewed PR #26 across three passes. The first pass found two
+          MAJOR and five MINOR PostgreSQL-catalogue issues. Kimi fixed all
+          seven, then replaced a residual planner-order dependency with a real
+          <code>MATERIALIZED</code> CTE plus <code>LATERAL</code> data-flow
+          barrier. Final verdict: <strong>SHIP</strong>, 0 blockers, 0 majors, 0
+          minors. Full chronology: <a href="reviews.html">reviews page</a>.
         </p>
 
         <h2>Implemented versus planned</h2>
         <table>
           <caption>
-            Capability state at v0.2 intake
+            Current v0.2 capability state
           </caption>
           <thead>
             <tr>
@@ -119,7 +127,10 @@
             </tr>
             <tr>
               <td>Schema introspection (read-only)</td>
-              <td><span class="badge queued">queued</span> V02-01..V02-03</td>
+              <td>
+                <span class="badge progress">approved</span> V02-01 / PR #26;
+                <span class="badge queued">queued</span> V02-02..V02-03
+              </td>
             </tr>
             <tr>
               <td>Typed DDL layer and operation history</td>
@@ -160,7 +171,7 @@
             >
           </li>
           <li><a href="roadmap.html">Roadmap — the 20-item v0.2 queue</a></li>
-          <li><a href="reviews.html">Reviews — PR #14–#25 chronology</a></li>
+          <li><a href="reviews.html">Reviews — PR #14–#26 chronology</a></li>
           <li>
             <a href="security.html">Security — boundaries and findings</a>
           </li>
@@ -176,7 +187,8 @@
     <footer class="site">
       <div class="wrap">
         Static wiki: relative links only, no external assets, no JavaScript.
-        Rendered from the repository working tree at v0.2 intake.
+        Last updated
+        <time datetime="2026-09-21T20:39:47Z">2026-09-21 20:39 UTC</time>.
       </div>
     </footer>
   </body>

@@ -27,12 +27,20 @@
     <main id="main">
       <div class="wrap">
         <h2>v0.2 queue state</h2>
+        <p class="muted">
+          Last updated:
+          <time datetime="2026-09-21T20:39:47Z">2026-09-21 20:39 UTC</time>.
+        </p>
         <p>
           The v0.2 queue has 20 items (V02-00 through V02-19).
           <strong
-            >V02-00 is complete; V02-01 is next — 1 of 20 merged (5%)</strong
+            >V02-00 is complete; V02-01 is approved for merge — 1 of 20 merged
+            (5%) until PR #26 merges</strong
           >. One active implementation PR at a time; each merges only after
           independent review with no unresolved BLOCKER/MAJOR and green CI.
+        </p>
+        <p class="muted">
+          Completion timestamps use the GitHub merge time and are shown in UTC.
         </p>
 
         <h2>Foundation</h2>
@@ -51,7 +59,12 @@
             <tr>
               <td>V02-00</td>
               <td>Direction, queue, and project wiki (documentation only)</td>
-              <td><span class="badge done">completed</span> PR #25</td>
+              <td>
+                <span class="badge done">completed</span> PR #25 ·
+                <time datetime="2026-09-21T18:30:13Z"
+                  >2026-09-21 18:30 UTC</time
+                >
+              </td>
             </tr>
           </tbody>
         </table>
@@ -72,7 +85,12 @@
             <tr>
               <td>V02-01</td>
               <td>Schema catalogue contracts and table/column reader</td>
-              <td><span class="badge queued">next</span></td>
+              <td>
+                <span class="badge progress">approved</span> PR #26 · final SHIP
+                <time datetime="2026-09-21T20:39:47Z"
+                  >2026-09-21 20:39 UTC</time
+                >
+              </td>
             </tr>
             <tr>
               <td>V02-02</td>
@@ -258,7 +276,8 @@
     <footer class="site">
       <div class="wrap">
         Static wiki: relative links only, no external assets, no JavaScript.
-        Rendered from the repository working tree at v0.2 intake.
+        Last updated
+        <time datetime="2026-09-21T20:39:47Z">2026-09-21 20:39 UTC</time>.
       </div>
     </footer>
   </body>

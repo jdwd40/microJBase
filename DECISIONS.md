@@ -122,3 +122,9 @@ RLS management begins with named read, insert, update, and delete ownership temp
 
 The admin API is added only after internal services are stable. A GUI is not part of this queue; the final wave ends with a stable backend contract ready for a lightweight GUI.
 
+## D-021 — Schema catalogue reads one pinned snapshot and fail-closed mapping
+
+**Status:** Accepted 2026-09-21
+
+The V02-01 schema-catalogue reader issues exactly one static read-only statement per read and pins `search_path` to `pg_catalog` transaction-locally inside that statement: a `MATERIALIZED` pin CTE executes `pg_catalog.set_config` once before the outer query, and the catalogue `UNION` renders inside a `LATERAL` subquery that outer-references the pin in every branch, so `format_type`/`pg_get_expr` rendering cannot execute ahead of the pin on any planner path. One statement gives one PostgreSQL snapshot (no cross-connection stitching under concurrent DDL) and deterministic rendering regardless of the caller's `search_path`; the pin is transaction-local, so pooled sessions are never mutated. Rows are validated strictly before mapping — fields of other row kinds must be null, duplicate schema/table/column keys and orphan rows fail closed — because a catalogue that fabricates or silently drops metadata is worse than one that refuses to answer. Generated columns report `generated: "stored" | "virtual"` (PostgreSQL 18 `attgenerated 'v'`) with `defaultExpression` always null, and `baseType` is the immediate `pg_type.typbasetype` of a declared domain, which may itself be a domain.
+
