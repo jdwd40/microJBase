@@ -97,7 +97,7 @@ Only configured aliases such as `todos=public.todos` are exposed. Table and colu
 
 **v0.1.0 released.** The v0.1 milestone is complete: tag `v0.1.0` on `master` (base commit `9413cfa`), 34 test files / 352 tests green, latest base-commit CI green. See [docs/release-notes-v0.1.md](docs/release-notes-v0.1.md) for release evidence.
 
-**v0.2 active.** The V02-00 planning/wiki foundation is complete; Wave 1 read-only schema introspection is in progress in V02-01 / PR #26. The milestone adds deliberately small schema-management capabilities behind an opt-in admin boundary. See [docs/v0.2-scope.md](docs/v0.2-scope.md), [docs/v0.2-architecture.md](docs/v0.2-architecture.md), and [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md). Progress is tracked on the [project wiki](docs/project/index.html).
+**v0.2 active.** The V02-00 planning/wiki foundation is complete; Wave 1 read-only schema introspection V02-01 is approved for merge in PR #26 after a final Grok 4.6 SHIP verdict. The milestone adds deliberately small schema-management capabilities behind an opt-in admin boundary. See [docs/v0.2-scope.md](docs/v0.2-scope.md), [docs/v0.2-architecture.md](docs/v0.2-architecture.md), and [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md). Progress is tracked on the [project wiki](docs/project/index.html).
 
 The implementation sequence for v0.1 is in [ROADMAP.md](ROADMAP.md). AI coding agents must follow [AGENTS.md](AGENTS.md).
 
