@@ -26,6 +26,25 @@
     </header>
     <main id="main">
       <div class="wrap">
+        <h2>Latest v0.2 review</h2>
+        <section class="panel" aria-labelledby="review-pr25">
+          <h3 id="review-pr25">PR #25 — V02-00 foundation</h3>
+          <p>
+            Purpose: freeze the v0.2 schema-management scope, architecture, and
+            20-item queue, and seed this static project wiki. The change added
+            no runtime capability.
+          </p>
+          <p>
+            Grok 4.6 first returned DO NOT SHIP with 0 blockers, 1 MAJOR, and 8
+            MINOR findings. The MAJOR identified a missing PostgreSQL
+            table-owner and runtime GRANT/REVOKE contract. Kimi fixed the full
+            review in <code>0a075e3</code>. Grok re-reviewed the updated diff
+            and returned <strong>SHIP</strong> with 0 blockers, 0 unresolved
+            majors, and 1 non-blocking wording minor; that wording was corrected
+            before merge. CI passed 34 files / 352 tests.
+          </p>
+        </section>
+
         <h2>Review chronology</h2>
         <p>
           Merged implementation and release PRs for v0.1, in merge order. GitHub

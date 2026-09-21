@@ -103,9 +103,9 @@ Merged in PR #24.
 - [x] Run the full release checklist
 - [x] Tag `v0.1.0`
 
-## v0.2 — schema management (planned)
+## v0.2 — schema management (active)
 
-v0.2 adds deliberately small schema-management capabilities: read-only introspection, a typed audited DDL layer, a durable exposure registry, predefined RLS ownership templates, and an opt-in admin API. The frozen sequential queue (V02-00 through V02-19, one active implementation PR at a time) is defined in [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md); scope and architecture are in [docs/v0.2-scope.md](docs/v0.2-scope.md) and [docs/v0.2-architecture.md](docs/v0.2-architecture.md).
+V02-00 is complete in PR #25; V02-01 (read-only schema catalogue contracts and the table/column reader) is next. Progress: 1 of 20 queue items merged (5%). v0.2 adds deliberately small schema-management capabilities: read-only introspection, a typed audited DDL layer, a durable exposure registry, predefined RLS ownership templates, and an opt-in admin API. The frozen sequential queue (V02-00 through V02-19, one active implementation PR at a time) is defined in [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md); scope and architecture are in [docs/v0.2-scope.md](docs/v0.2-scope.md) and [docs/v0.2-architecture.md](docs/v0.2-architecture.md).
 
 ## Later candidates — not commitments
 
