@@ -107,14 +107,23 @@ microJBase server (one Node.js process)
           <li>
             A third, optional schema-admin lane
             (<code>SCHEMA_DATABASE_URL</code>) is used only by the
-            disabled-by-default admin/schema module and fails closed on
-            superuser, <code>BYPASSRLS</code>, or role management.
+            disabled-by-default admin/schema module. It connects as a
+            non-superuser, non-<code>BYPASSRLS</code> role that owns every table
+            it mutates; it may be the same PostgreSQL role as the migration role
+            but remains a separate request-time surface and is never the runtime
+            role. Create/alter leaves ownership on that owner; expose/unexpose
+            applies least-privilege runtime <code>GRANT</code>/<code
+              >REVOKE</code
+            >
+            and fails closed on missing grants; policy commands run only as the
+            owner, never via superuser escalation.
           </li>
           <li>
             Schema operations are typed commands compiled by one audited DDL
             layer; HTTP handlers never construct SQL; identifiers are
-            conservatively validated and quoted; values stay parameterised;
-            defaults come from a typed allowlist/template model.
+            conservatively validated and quoted; values remain parameterised
+            where PostgreSQL permits; defaults come from a typed
+            allowlist/template model.
           </li>
           <li>
             The v0.2 type allowlist is <code>text</code>, <code>integer</code>,
@@ -123,10 +132,23 @@ microJBase server (one Node.js process)
             <code>numeric</code>, <code>jsonb</code>.
           </li>
           <li>
+            Default templates are a typed literal,
+            <code>current_timestamp</code> (emitting
+            <code>CURRENT_TIMESTAMP</code> only for
+            <code>timestamp</code>/<code>timestamptz</code>), and
+            <code>random_uuid</code> (emitting
+            <code>gen_random_uuid()</code> only for <code>uuid</code>);
+            foreign-key actions are limited to <code>NO ACTION</code>,
+            <code>RESTRICT</code>, <code>CASCADE</code>, and
+            <code>SET NULL</code> (nullable referencing columns only), with no
+            <code>SET DEFAULT</code>.
+          </li>
+          <li>
             A durable exposure registry separates “table exists” from “table is
             exposed to the data API”, with a one-time migration from
-            <code>MICROJBASE_TABLES</code>; after import the environment
-            variable cannot re-expose a table an operator unexposed.
+            <code>MICROJBASE_TABLES</code>; after import the registry is the
+            sole runtime exposure source — the environment variable cannot add
+            tables at runtime or re-expose a table an operator unexposed.
           </li>
           <li>
             RLS management is limited to predefined ownership templates around

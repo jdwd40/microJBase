@@ -124,9 +124,10 @@
               <td>Operator capability/health probe</td>
               <td>V02-16</td>
               <td>
-                Operator bearer token only; module inert unless
+                Operator bearer token only; startup fails when exactly one of
                 <code>SCHEMA_DATABASE_URL</code> and
-                <code>MICROJBASE_ADMIN_TOKEN_SHA256</code> are configured.
+                <code>MICROJBASE_ADMIN_TOKEN_SHA256</code> is configured, and
+                with neither the module is inert.
               </td>
             </tr>
             <tr>

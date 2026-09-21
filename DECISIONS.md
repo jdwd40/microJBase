@@ -1,6 +1,6 @@
 # Architecture Decisions
 
-Accepted decisions are binding for v0.1. Additions use the next number; existing entries are not rewritten to hide history.
+Accepted decisions bind the milestone under which they were accepted: D-001 through D-009 bind v0.1, and D-010 onward bind the v0.2 plan. Additions use the next number; existing entries are not rewritten to hide history.
 
 ## D-001 — Build a focused backend, not a small Supabase clone
 
@@ -66,13 +66,13 @@ v0.2 keeps one Node process, one PostgreSQL database, and the existing module bo
 
 **Status:** Accepted 2026-09-21
 
-The restricted runtime data role (`DATABASE_URL`), the explicit migration command role (`MIGRATION_DATABASE_URL`, never used by request handlers), and the optional schema-admin role (`SCHEMA_DATABASE_URL`) stay separate. The schema-admin role is used only by the disabled-by-default admin/schema module.
+The restricted runtime data role (`DATABASE_URL`), the explicit migration command role (`MIGRATION_DATABASE_URL`, never used by request handlers), and the optional schema-admin role (`SCHEMA_DATABASE_URL`) stay separate. The schema-admin role connects as a non-superuser, non-`BYPASSRLS` PostgreSQL role that owns every table it mutates. It may be the same PostgreSQL role as `MIGRATION_DATABASE_URL`, but the connection URL remains a separate request-time surface and must never be the restricted runtime role (`DATABASE_URL`). Create/alter operations leave ownership on that owner role. Expose/unexpose applies least-privilege `GRANT`/`REVOKE` for the runtime role and fails closed when required grants are missing. Policy management executes only as the table owner, never via superuser escalation or `SET ROLE` to a superuser. The schema-admin role is used only by the disabled-by-default admin/schema module.
 
 ## D-012 — Admin/schema API is opt-in and disabled by default
 
 **Status:** Accepted 2026-09-21
 
-The admin/schema API is enabled only when both a schema-admin database URL and an operator-token SHA-256 digest are configured. It uses a separate `/v1/admin/schema` route tree and a small bounded admin pool. Without both settings the module is inert.
+The admin/schema API is enabled only when both a schema-admin database URL and an operator-token SHA-256 digest are configured. Configuring exactly one of the two fails startup; with neither, the module is inert. It uses a separate `/v1/admin/schema` route tree and a small bounded admin pool.
 
 ## D-013 — Single operator bearer token with SHA-256 digest verification
 
@@ -84,13 +84,13 @@ Admin authorization is one operator bearer token whose SHA-256 digest is configu
 
 **Status:** Accepted 2026-09-21
 
-Schema operations are typed commands compiled by a single audited DDL layer. HTTP handlers never construct SQL. Values remain parameterised where PostgreSQL permits; identifiers are accepted only after conservative validation and are quoted by the audited helper. Defaults use a typed allowlist/template model, not arbitrary SQL.
+Schema operations are typed commands compiled by a single audited DDL layer. HTTP handlers never construct SQL. Values remain parameterised where PostgreSQL permits; identifiers are accepted only after conservative validation and are quoted by the audited helper. Defaults use a typed allowlist/template model, not arbitrary SQL: the initial templates are a typed literal, `current_timestamp` (emitting `CURRENT_TIMESTAMP` only for `timestamp`/`timestamptz`), and `random_uuid` (emitting `gen_random_uuid()` only for `uuid`).
 
 ## D-015 — Destructive commands require explicit confirmation
 
 **Status:** Accepted 2026-09-21
 
-Destructive schema commands require an explicit confirmation value and refuse internal schemas and objects. An exposed table must be unexposed before destructive mutation unless a narrowly documented atomic operation says otherwise.
+Destructive schema commands require an explicit confirmation value and refuse internal schemas and objects. An exposed table must be unexposed before destructive mutation.
 
 ## D-016 — Read-only schema introspection precedes mutation
 
@@ -102,19 +102,19 @@ Read-only schema introspection ships before any schema mutation. It reports sche
 
 **Status:** Accepted 2026-09-21
 
-Controlled schema commands are transactionally executed when PostgreSQL supports it, protected by idempotency/replay keys, and recorded in durable operation history. No arbitrary migration SQL upload or normal-client SQL endpoint is introduced.
+Controlled schema commands are transactionally executed when PostgreSQL supports it, protected by idempotency/replay keys, recorded in durable operation history, and serialized with the reserved schema-DDL advisory-lock key `7921890504698152930`, distinct from the migration runner key `7921890504698152929`. No arbitrary migration SQL upload or normal-client SQL endpoint is introduced.
 
 ## D-018 — Database existence and API exposure are separate states
 
 **Status:** Accepted 2026-09-21
 
-v0.2 introduces a durable exposure registry and an explicit, tested migration path from `MICROJBASE_TABLES`; the environment variable cannot re-expose a table after an admin unexpose. Internal schemas and tables are permanently ineligible for exposure.
+v0.2 introduces a durable exposure registry and an explicit, tested migration path from `MICROJBASE_TABLES`. After the one-time import, the durable registry is the sole runtime exposure source: `MICROJBASE_TABLES` cannot add tables at runtime and cannot re-expose a table after an admin unexpose. Internal schemas and tables are permanently ineligible for exposure.
 
 ## D-019 — RLS management starts with predefined ownership templates
 
 **Status:** Accepted 2026-09-21
 
-RLS management begins with predefined ownership templates around `microjbase.user_id`. Arbitrary policy SQL is out of scope.
+RLS management begins with named read, insert, update, and delete ownership templates around `microjbase.user_id`. Arbitrary policy SQL is out of scope.
 
 ## D-020 — Admin API lands last; no GUI in this queue
 

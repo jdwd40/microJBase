@@ -127,16 +127,16 @@
             ordinary user/session auth.
           </li>
           <li>
-            The admin/schema module is opt-in and inert unless both a
-            schema-admin database URL and the token digest are configured; it
-            uses a separate <code>/v1/admin/schema</code> route tree, a small
-            bounded admin pool, and separate rate limiting.
+            The admin/schema module is opt-in: startup fails when exactly one of
+            the schema-admin database URL and the token digest is configured,
+            and with neither the module is inert. It uses a separate
+            <code>/v1/admin/schema</code> route tree, a small bounded admin
+            pool, and separate rate limiting.
           </li>
           <li>
             Destructive schema commands require an explicit confirmation value
             and refuse internal schemas and objects; an exposed table must be
-            unexposed before destructive mutation unless a narrowly documented
-            atomic operation says otherwise.
+            unexposed before destructive mutation.
           </li>
           <li>
             Schema operations are typed commands compiled by one audited DDL
@@ -145,8 +145,15 @@
           </li>
           <li>
             A third privilege lane (<code>SCHEMA_DATABASE_URL</code>) stays
-            separate from the runtime and migration roles and fails closed on
-            superuser, <code>BYPASSRLS</code>, or role-management rights.
+            separate from the runtime and migration roles and connects as a
+            non-superuser, non-<code>BYPASSRLS</code> owner of every table it
+            mutates; it may share the migration role but never the runtime role,
+            applies least-privilege runtime <code>GRANT</code>/<code
+              >REVOKE</code
+            >
+            on expose/unexpose with fail-closed missing grants, and runs policy
+            commands only as the owner — never via superuser escalation or
+            <code>SET ROLE</code>.
           </li>
         </ul>
       </div>

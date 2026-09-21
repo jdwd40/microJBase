@@ -35,7 +35,7 @@ Deliberately excluded:
 
 See [docs/v0.1-scope.md](docs/v0.1-scope.md) for the frozen milestone.
 
-## Planned stack
+## v0.1 stack (implemented)
 
 - Node.js 22 LTS and TypeScript
 - Fastify for HTTP and its built-in logging/schema support
@@ -75,7 +75,7 @@ The API process authenticates a session, begins a database transaction, sets the
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) and [CONTRACTS.md](CONTRACTS.md) before implementation.
 
-## Proposed API
+## v0.1 API (implemented)
 
 ```text
 GET    /health
