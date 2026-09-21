@@ -296,7 +296,7 @@ export interface SchemaCatalogueReader {
 
 Reader guarantees:
 
-- Exactly one static read-only `SELECT` per `read()` — no parameters, no interpolation — so the result comes from a single PostgreSQL snapshot. The statement pins `search_path` to `pg_catalog` transaction-locally, so rendered type/default expressions are deterministic regardless of the caller's `search_path`.
+- Exactly one static read-only statement per `read()` — no parameters, no interpolation — so the result comes from a single PostgreSQL snapshot. The statement pins `search_path` to `pg_catalog` transaction-locally behind a `MATERIALIZED` CTE plus `LATERAL` outer-reference barrier, so rendered type/default expressions are deterministic regardless of the caller's `search_path` or the planner path taken.
 - Schemas are the non-system schemas (`information_schema` and `pg_%` excluded, which also covers `pg_toast`/`pg_temp_*`); only `relkind IN ('r','p')` tables are reported. Empty schemas and zero-column tables appear with empty arrays.
 - Output ordering is deterministic: schemas by name, tables by name within a schema, columns by ordinal within a table.
 - Fail-closed mapping: malformed rows, rows carrying fields of another row kind, duplicate schema names, duplicate table keys, duplicate column ordinals/names, and orphan tables/columns (a row whose parent is absent from the read) all raise `INTERNAL_ERROR`; nothing is fabricated or silently dropped. Dependency errors pass through the existing safe database error translation boundary.

@@ -13,6 +13,13 @@
 // pg_catalog.set_config inside the statement), so format_type/pg_get_expr
 // renderings are deterministic regardless of the caller's search_path.
 //
+// The pin is a real SQL-semantic barrier, not a planner coincidence: a
+// MATERIALIZED CTE executes pg_catalog.set_config exactly once before the
+// outer query, and the catalogue UNION renders inside a LATERAL subquery
+// that carries an outer reference (pin.pinned_path) into every branch, so
+// the rendering cannot execute until the pin has. The pin is
+// transaction-local, so pooled sessions are never mutated.
+//
 // The query capability is injected by the caller; this module never
 // constructs a production pool. V02-04 introduces the schema-admin
 // connection boundary that will inject it in production.
@@ -50,7 +57,18 @@ export interface SchemaCatalogueDependencies {
 // table, column) are returned together and tagged by row_kind; columns not
 // meaningful for a kind are NULL. Exported for unit tests that pin the
 // query shape; not part of the public module surface.
-export const SCHEMA_CATALOGUE_SQL = `SELECT r.row_kind,
+//
+// The statement opens with a MATERIALIZED search_path_pin CTE so
+// pg_catalog.set_config runs exactly once before the outer query, and the
+// catalogue UNION renders inside a LATERAL subquery that references
+// pin.pinned_path in every branch. The LATERAL outer reference is what
+// makes the pin an evaluation barrier: the UNION cannot execute until the
+// pin CTE has produced its row. pinned_path is data-flow only and is never
+// projected into the catalogue rows.
+export const SCHEMA_CATALOGUE_SQL = `WITH search_path_pin AS MATERIALIZED (
+  SELECT pg_catalog.set_config('search_path', 'pg_catalog', true) AS pinned_path
+)
+SELECT r.row_kind,
        r.schema_name,
        r.table_name,
        r.ordinal,
@@ -70,7 +88,8 @@ export const SCHEMA_CATALOGUE_SQL = `SELECT r.row_kind,
        r.base_type_schema,
        r.base_type_name,
        r.base_type_kind
-FROM (
+FROM search_path_pin pin
+CROSS JOIN LATERAL (
   SELECT 'schema' AS row_kind,
          n.nspname AS schema_name,
          NULL::text AS table_name,
@@ -90,7 +109,8 @@ FROM (
          NULL::text AS type_kind,
          NULL::text AS base_type_schema,
          NULL::text AS base_type_name,
-         NULL::text AS base_type_kind
+         NULL::text AS base_type_kind,
+         pin.pinned_path
   FROM pg_catalog.pg_namespace n
   WHERE n.nspname <> 'information_schema'
     AND n.nspname NOT LIKE 'pg\\_%'
@@ -114,7 +134,8 @@ FROM (
          NULL::text,
          NULL::text,
          NULL::text,
-         NULL::text
+         NULL::text,
+         pin.pinned_path
   FROM pg_catalog.pg_class c
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
   WHERE c.relkind IN ('r', 'p')
@@ -140,7 +161,8 @@ FROM (
          ty.typtype::text,
          bn.nspname,
          bt.typname,
-         bt.typtype::text
+         bt.typtype::text,
+         pin.pinned_path
   FROM pg_catalog.pg_attribute a
   JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -155,7 +177,6 @@ FROM (
     AND n.nspname <> 'information_schema'
     AND n.nspname NOT LIKE 'pg\\_%'
 ) r
-CROSS JOIN (SELECT pg_catalog.set_config('search_path', 'pg_catalog', true)) search_path_pin
 ORDER BY r.row_kind, r.schema_name, r.table_name, r.ordinal`
 
 // Raw unified catalogue row shape as returned by the fixed query. Every row

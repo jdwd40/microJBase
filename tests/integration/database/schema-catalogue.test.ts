@@ -490,6 +490,66 @@ describe("schema catalogue reader (real PostgreSQL)", () => {
     }
   })
 
+  it("renders a caller-visible domain with pinned qualification on a non-default planner path and restores search_path after autocommit", async () => {
+    const client = new pg.Client({ connectionString: adminDatabaseUrl })
+    await client.connect()
+    try {
+      await client.query(`SET search_path TO ${quoteIdent(APP_SCHEMA)}, public`)
+      // Force a genuinely non-default planner path: the join implementing
+      // the LATERAL must still nest-loop with the pin CTE on the outside.
+      await client.query("SET enable_nestloop = off")
+      await client.query("SET enable_hashjoin = off")
+      await client.query("SET enable_mergejoin = off")
+      await client.query("SET enable_seqscan = off")
+
+      for (const guc of [
+        "enable_nestloop",
+        "enable_hashjoin",
+        "enable_mergejoin",
+        "enable_seqscan",
+      ]) {
+        const setting = await client.query(`SHOW ${guc}`)
+        expect(setting.rows[0]?.[guc]).toBe("off")
+      }
+
+      // The caller session genuinely sees the domain unqualified.
+      const visible = await client.query(`
+        SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) AS rendered
+        FROM pg_catalog.pg_attribute a
+        JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = ${quoteLiteral(APP_SCHEMA)}
+          AND c.relname = 'articles'
+          AND a.attname = 'postal'
+      `)
+      expect(visible.rows[0]?.rendered).toBe("postal_code")
+
+      const reader = createSchemaCatalogueReader({
+        query: ((text: string, values?: unknown[]) =>
+          client.query(text, values)) as SchemaCatalogueDependencies["query"],
+      })
+      const catalogue = await reader.read()
+      const postal = findColumn(
+        findTable(findSchema(catalogue, APP_SCHEMA), "articles"),
+        "postal",
+      )
+
+      // The MATERIALIZED pin CTE runs before the LATERAL catalogue UNION on
+      // any planner path, so rendering stays pinned to pg_catalog.
+      expect(postal.renderedType).toBe("v0201_app.postal_code")
+      expect(postal.defaultExpression).toBe(
+        "('12345'::text)::v0201_app.postal_code",
+      )
+
+      // The pin is transaction-local: after autocommit the caller session is
+      // untouched.
+      const after = await client.query("SHOW search_path")
+      expect(after.rows[0]?.search_path).toBe(`${APP_SCHEMA}, public`)
+    } finally {
+      await client.end()
+    }
+  })
+
   it("returns quoted hostile identifiers exactly as data", async () => {
     const catalogue = await readCatalogue()
     const schema = findSchema(catalogue, WEIRD_SCHEMA)

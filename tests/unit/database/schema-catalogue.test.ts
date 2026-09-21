@@ -115,7 +115,9 @@ describe("schema catalogue query shape", () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]?.text).toBe(SCHEMA_CATALOGUE_SQL)
     expect(calls[0]?.values).toBeUndefined()
-    expect(calls[0]?.text.trimStart().toUpperCase().startsWith("SELECT")).toBe(
+    // The statement is a single WITH ... SELECT (the pin CTE leads the
+    // statement); it must remain one parameterless read-only statement.
+    expect(calls[0]?.text.trimStart().toUpperCase().startsWith("WITH")).toBe(
       true,
     )
     expect(calls[0]?.text).not.toContain("${")
@@ -123,13 +125,21 @@ describe("schema catalogue query shape", () => {
     expect(calls[0]?.text).not.toMatch(FORBIDDEN_TOKENS)
   })
 
-  it("pins transaction-local search_path to pg_catalog inside the statement", () => {
+  it("pins transaction-local search_path to pg_catalog behind a LATERAL barrier", () => {
     expect(SCHEMA_CATALOGUE_SQL).toContain(
       "pg_catalog.set_config('search_path', 'pg_catalog', true)",
     )
     expect(SCHEMA_CATALOGUE_SQL).toContain("pg_catalog.format_type(")
     expect(SCHEMA_CATALOGUE_SQL).toContain("pg_catalog.pg_get_expr(")
     expect(SCHEMA_CATALOGUE_SQL).toContain("pg_catalog.pg_get_userbyid(")
+    // The pin is a semantic evaluation barrier, not planner luck: a
+    // MATERIALIZED CTE runs set_config once before the outer query, and the
+    // catalogue UNION renders inside a LATERAL subquery that carries an
+    // outer reference into every branch, so rendering cannot run ahead of
+    // the pin on any planner path.
+    expect(SCHEMA_CATALOGUE_SQL).toContain("search_path_pin AS MATERIALIZED")
+    expect(SCHEMA_CATALOGUE_SQL).toContain("CROSS JOIN LATERAL")
+    expect(SCHEMA_CATALOGUE_SQL.match(/pin\.pinned_path/g)).toHaveLength(3)
   })
 
   it("returns schema, table, and column row sets together", () => {
