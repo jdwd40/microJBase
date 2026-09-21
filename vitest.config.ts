@@ -20,6 +20,13 @@ export default defineConfig({
         test: {
           name: "e2e",
           include: ["tests/e2e/**/*.test.ts"],
+          // Files share no state (each provisions its own database and
+          // server process) but serialize anyway: destructive database-failure
+          // scenarios mutate a shared cluster role, and a single worker keeps
+          // CI resource usage predictable.
+          fileParallelism: false,
+          testTimeout: 60_000,
+          hookTimeout: 120_000,
         },
       },
     ],

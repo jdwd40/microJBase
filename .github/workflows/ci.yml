@@ -27,6 +27,9 @@ jobs:
       MIGRATION_DATABASE_URL: postgres://microjbase:microjbase_dev_password@localhost:5432/microjbase_migration_test
       INTEGRATION_ADMIN_DATABASE_URL: postgres://microjbase:microjbase_dev_password@localhost:5432/microjbase_integration_test
       INTEGRATION_DATABASE_URL: postgres://microjbase_runtime:microjbase_runtime_password@localhost:5432/microjbase_integration_test
+      # Privileged maintenance-database URL used by the E2E suite to
+      # provision its dedicated microjbase_e2e database and runtime role.
+      E2E_ADMIN_DATABASE_URL: postgres://microjbase:microjbase_dev_password@localhost:5432/postgres
     steps:
       - name: Checkout
         uses: actions/checkout@v4
