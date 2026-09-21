@@ -97,6 +97,40 @@ npm run migrate
 Expected output: `Applied migration 0001_...` through the newest file. A
 re-run prints nothing and exits 0.
 
+Migrations intentionally create no roles and grant no runtime privileges.
+Before the application can start, the restricted runtime role needs exactly
+the privileges the API uses — nothing more. Run as the migration/admin role:
+
+```sql
+GRANT USAGE ON SCHEMA microjbase TO microjbase_runtime;
+
+GRANT SELECT ON microjbase.schema_migrations TO microjbase_runtime;
+
+GRANT SELECT, INSERT ON microjbase.users TO microjbase_runtime;
+
+GRANT SELECT, INSERT, UPDATE ON microjbase.sessions TO microjbase_runtime;
+
+GRANT USAGE ON SCHEMA public TO microjbase_runtime;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.todos TO microjbase_runtime;
+```
+
+This mirrors the privilege model proven by the integration/E2E suites. Keep
+these rules in mind:
+
+- The runtime role must remain `NOSUPERUSER NOBYPASSRLS` — the application
+  checks this at startup and refuses to run otherwise. Do not broaden the
+  role to make something "work"; fix the missing grant instead.
+- Every exposed application table (each `MICROJBASE_TABLES` entry) requires
+  its own explicit runtime grant. Adding another table means granting its
+  intended CRUD privileges here after creating/migrating it.
+- This is also why the migrations never grant anything: privileges are a
+  deployment decision, reviewed per exposed table.
+- When restoring into newly recreated roles (see
+  [operations.md](operations.md)), these grants may need to be reapplied —
+  `pg_dump` archives do not carry `GRANT` statements for roles that did not
+  exist at dump time.
+
 ### 2.5 systemd unit
 
 `/etc/systemd/system/microjbase.service`:
@@ -121,7 +155,10 @@ RestartSec=5
 # SIGTERM; measured shutdown is well under a second.
 TimeoutStopSec=15
 
-# Hardening (verified not to break the application on Ubuntu 24.04):
+# Hardening. The application needs no filesystem writes, no device access,
+# no elevated privileges, and no exotic syscalls; these directives are safe
+# for that shape on modern systemd. Review against your systemd version
+# rather than treating this list as certified.
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true

@@ -44,9 +44,27 @@ starting the app never runs "down" migrations — but it also never repairs
 schema drift; restore to the application version that took the backup, then
 upgrade normally.
 
+Database-level operations (dropping/creating the database) must run while
+connected to a **different** database — you cannot drop the database you are
+currently connected to. Define a maintenance URL that points at the standard
+`postgres` maintenance database (same host/admin role, different database):
+
+```bash
+set -a; . /etc/microjbase/microjbase.env; set +a
+MAINTENANCE_DATABASE_URL='postgres://microjbase_admin:<strong-random-password>@127.0.0.1:5432/postgres'
+```
+
+Every `psql` command in steps 3 below uses this maintenance URL — not
+`MIGRATION_DATABASE_URL`. (A URI's database component selects the connection
+database; appending `-d postgres` to a psql invocation does **not** reliably
+override a connection URL that already names another database.)
+
 1. **Provision roles/database** if the cluster is fresh (same SQL as
    deployment §2.1), with the same passwords as at backup time, or update
-   `/etc/microjbase/microjbase.env` to the new credentials.
+   `/etc/microjbase/microjbase.env` to the new credentials. If the roles were
+   recreated rather than preserved, reapply the runtime GRANTs from
+   [deployment.md](deployment.md) §2.4 — `pg_dump` archives do not carry
+   grants for roles that did not exist at dump time.
 
 2. **Stop the application**:
 
@@ -54,18 +72,25 @@ upgrade normally.
    sudo systemctl stop microjbase
    ```
 
-3. **Drop and recreate the database** (restoring into a dirty database risks
-   constraint conflicts):
+3. **Terminate active connections, then drop and recreate the database**
+   (restoring into a dirty database risks constraint conflicts). All three
+   commands connect through the maintenance URL to the `postgres` database,
+   never to `microjbase` itself:
 
    ```bash
-   psql "$MIGRATION_DATABASE_URL" -c 'SELECT pg_terminate_backend(pid)
-     FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();' \
-     -d postgres
-   psql "$MIGRATION_DATABASE_URL" -d postgres \
-     -c 'DROP DATABASE microjbase;' -c 'CREATE DATABASE microjbase OWNER microjbase_admin;'
+   psql "$MAINTENANCE_DATABASE_URL" \
+     -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE datname = 'microjbase' AND pid <> pg_backend_pid();"
+
+   psql "$MAINTENANCE_DATABASE_URL" -c 'DROP DATABASE microjbase;'
+
+   psql "$MAINTENANCE_DATABASE_URL" \
+     -c 'CREATE DATABASE microjbase OWNER microjbase_admin;'
    ```
 
-4. **Restore**:
+4. **Restore into the recreated application database** using the
+   migration/admin URL (here the URI's database component is correct — it
+   names the freshly recreated `microjbase`):
 
    ```bash
    pg_restore --clean --if-exists --exit-on-error \

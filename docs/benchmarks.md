@@ -58,7 +58,10 @@ hardware class rather than a regression.
 
 ## Basic load
 
-Not a marketing benchmark — release evidence and footprint awareness only.
+Lightweight release evidence — not a marketing or scalability benchmark, and
+not a 20-concurrent CRUD benchmark. The measured run used concurrency 10 over
+a mixed read-only workload (`/health` plus an authenticated list); write
+paths are covered by the test suites, not by this measurement.
 
 - Tool: the benchmark script itself (dependency-free Node `fetch`, 10
   concurrent workers, sequential per worker).

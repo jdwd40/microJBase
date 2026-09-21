@@ -9,11 +9,14 @@ managed-Postgres service.
 
 ## What v0.1 provides
 
-- **Email/password authentication** — Argon2id password hashing (memory-hard,
-  64 MiB / 3 iterations / parallelism 4), timing-consistent unknown-email
-  handling.
-- **Opaque session tokens** — 32 random bytes, SHA-256 hashed at rest, sliding
-  expiration (7-day default), constant-time comparison.
+- **Email/password authentication** — Argon2id password hashing with explicit
+  parameters (19 MiB memory, 2 iterations, parallelism 1 — `ARGON2_MEMORY_COST_KIB`
+  = 19,456 in `src/auth/password.ts`), timing-consistent unknown-email
+  handling via a dummy Argon2id verification.
+- **Opaque session tokens** — 32 random bytes (base64url transport), SHA-256
+  hashed at rest, fixed lifetime of 7 days by default: `expires_at` is set at
+  registration/login and is **not** extended by activity (no sliding
+  expiration; logging in again creates a new session).
 - **PostgreSQL persistence** — one schema owned by the application, forward-only
   migrations applied explicitly (never at request time), schema-migration
   bookkeeping in `microjbase.schema_migrations`.
@@ -21,8 +24,8 @@ managed-Postgres service.
   non-`BYPASSRLS` role and **refuses to start** if that is violated. DDL rights
   live only in the migration/admin role.
 - **Safe CRUD over HTTP** — table whitelist, column allow-listing, typed value
-  validation, optimistic concurrency via `If-Match`, parameterised SQL only,
-  bounded body size, sane error envelopes that never leak internals.
+  validation, parameterised SQL only, bounded body size, sane error envelopes
+  that never leak internals.
 - **RLS-based ownership isolation** — row-level security is the enforcement
   boundary for multi-user data; verified by dedicated Alice/Bob test
   characters in integration and E2E suites.

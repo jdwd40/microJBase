@@ -21,7 +21,8 @@ lives; nothing here is assumed.
 
 ## Functional smoke (deployed, compiled application)
 
-- [ ] `GET /health` → 200 `{"status":"ok","database":"ok"}`.
+- [ ] `GET /health` → 200 with the public envelope
+      `{"data":{"status":"ok","database":"ok"},"error":null}`.
 - [ ] Register + login → opaque bearer token.
 - [ ] Authenticated CRUD round-trip on an exposed table.
 - [ ] Missing `Authorization` on `/v1/data/*` → 401 `AUTH_REQUIRED`, no
