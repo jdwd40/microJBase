@@ -3,6 +3,7 @@
 
 export * from "./auth.js"
 export * from "./data.js"
+export * from "./schema.js"
 
 // Domain errors have a stable machine code and safe public message.
 // Unexpected errors become INTERNAL_ERROR; stack traces and database

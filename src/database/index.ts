@@ -43,6 +43,11 @@ export {
   type RegistryBuildDependencies,
 } from "./table-registry.js"
 export {
+  createSchemaCatalogueReader,
+  readSchemaCatalogue,
+  type SchemaCatalogueDependencies,
+} from "./schema-catalogue.js"
+export {
   type ColumnMetadata,
   type VerifiedTableMetadata,
 } from "./table-types.js"
