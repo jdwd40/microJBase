@@ -35,7 +35,7 @@ Deliberately excluded:
 
 See [docs/v0.1-scope.md](docs/v0.1-scope.md) for the frozen milestone.
 
-## Planned stack
+## v0.1 stack (implemented)
 
 - Node.js 22 LTS and TypeScript
 - Fastify for HTTP and its built-in logging/schema support
@@ -55,6 +55,10 @@ There is no PostgREST, JWT service, Redis, message broker, or frontend in v0.1.
 - [docs/operations.md](docs/operations.md) — backup, restore, and upgrade procedures.
 - [docs/benchmarks.md](docs/benchmarks.md) — measured startup, RSS, and load evidence (reproducible via `scripts/benchmark.ts`).
 - [docs/release-checklist.md](docs/release-checklist.md) and [docs/release-notes-v0.1.md](docs/release-notes-v0.1.md) — v0.1 release evidence.
+- [docs/v0.2-scope.md](docs/v0.2-scope.md) — v0.2 product statement, security boundaries, and non-goals (planned).
+- [docs/v0.2-architecture.md](docs/v0.2-architecture.md) — v0.2 target internal modules and trust boundaries (planned).
+- [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md) — the sequential V02-00..V02-19 queue (planned).
+- [Project wiki](docs/project/index.html) — framework-free static dashboard of verified repository state.
 
 ## Architecture
 
@@ -71,7 +75,7 @@ The API process authenticates a session, begins a database transaction, sets the
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) and [CONTRACTS.md](CONTRACTS.md) before implementation.
 
-## Proposed API
+## v0.1 API (implemented)
 
 ```text
 GET    /health
@@ -91,7 +95,9 @@ Only configured aliases such as `todos=public.todos` are exposed. Table and colu
 
 ## Status
 
-**Active; documentation and contracts frozen for the v0.1 implementation phase.**
+**v0.1.0 released.** The v0.1 milestone is complete: tag `v0.1.0` on `master` (base commit `9413cfa`), 34 test files / 352 tests green, latest base-commit CI green. See [docs/release-notes-v0.1.md](docs/release-notes-v0.1.md) for release evidence.
 
-The implementation sequence is in [ROADMAP.md](ROADMAP.md). AI coding agents must follow [AGENTS.md](AGENTS.md).
+**v0.2 active.** The V02-00 planning/wiki foundation is complete; Wave 1 begins with read-only schema introspection in V02-01. The milestone adds deliberately small schema-management capabilities behind an opt-in admin boundary. See [docs/v0.2-scope.md](docs/v0.2-scope.md), [docs/v0.2-architecture.md](docs/v0.2-architecture.md), and [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md). Progress is tracked on the [project wiki](docs/project/index.html).
+
+The implementation sequence for v0.1 is in [ROADMAP.md](ROADMAP.md). AI coding agents must follow [AGENTS.md](AGENTS.md).
 

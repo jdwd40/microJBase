@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>microJBase project wiki — architecture</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site">
+      <div class="wrap">
+        <h1>microJBase project wiki</h1>
+        <nav class="wiki" aria-label="Wiki">
+          <ul>
+            <li><a href="index.html">Dashboard</a></li>
+            <li>
+              <a href="architecture.html" aria-current="page">Architecture</a>
+            </li>
+            <li><a href="roadmap.html">Roadmap</a></li>
+            <li><a href="reviews.html">Reviews</a></li>
+            <li><a href="security.html">Security</a></li>
+            <li><a href="api.html">API</a></li>
+            <li><a href="history.html">History</a></li>
+          </ul>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <div class="wrap">
+        <h2>v0.1 architecture (implemented)</h2>
+        <p>
+          microJBase v0.1 is one TypeScript application connected to one
+          PostgreSQL database. An optional reverse proxy terminates TLS; it is
+          not part of the application. There are no internal network calls,
+          queues, caches, or independently deployed services.
+        </p>
+        <pre><code>Client
+  |
+  | HTTPS + bearer session
+  v
+Reverse proxy (optional)
+  |
+  v
+microJBase server (one Node.js process)
+  |-- HTTP module
+  |-- Auth module
+  |-- Data module
+  |-- Core module
+  `-- PostgreSQL adapters
+          |
+          v
+      PostgreSQL 16+</code></pre>
+        <p>
+          The API process authenticates a session, begins a database
+          transaction, sets the local PostgreSQL identity
+          (<code>microjbase.user_id</code>), and lets row-level security decide
+          which rows the caller may access. The identity setting is
+          transaction-local so a pooled connection never retains a user’s
+          identity.
+        </p>
+        <p>
+          Module dependency rules: <code>auth/</code> and
+          <code>data/</code> contain domain behaviour and depend on frozen
+          contracts, not PostgreSQL or Fastify; <code>database/</code> is the
+          only module that imports <code>pg</code>; <code>http/</code> maps HTTP
+          to service calls and owns transport validation; <code>main.ts</code>
+          is the only composition root. Source:
+          <code>ARCHITECTURE.md</code>.
+        </p>
+
+        <h2>Privilege lanes (implemented)</h2>
+        <p>
+          v0.1 separates the migration role, which owns objects and performs
+          DDL, from the restricted runtime role, which is non-superuser and
+          non-<code>BYPASSRLS</code>. The server refuses to start when the
+          runtime role violates those checks.
+        </p>
+        <ul>
+          <li>
+            <code>DATABASE_URL</code> — restricted runtime data role used by
+            request handlers.
+          </li>
+          <li>
+            <code>MIGRATION_DATABASE_URL</code> — explicit migration command
+            role; never used by request handlers.
+          </li>
+        </ul>
+
+        <h2>v0.2 target shape (planned)</h2>
+        <p class="note">
+          Everything in this section is planned capability from
+          <code>docs/v0.2-architecture.md</code>. None of it is implemented at
+          v0.2 intake.
+        </p>
+        <pre><code>HTTP routes (existing /v1/auth, /v1/data)
+   |-- Auth service ---- repository contracts ---- PostgreSQL adapters
+   |-- Data service ---- repository contracts ---- PostgreSQL adapters
+   |-- Core config/errors/logging
+   `-- (planned) Admin schema module
+          |-- Admin HTTP routes (/v1/admin/schema)
+          |-- Schema admin service (typed commands)
+          |-- Audited DDL compiler/executor
+          |-- Schema introspection readers
+          `-- Bounded admin pool (SCHEMA_DATABASE_URL)</code></pre>
+        <ul>
+          <li>
+            A third, optional schema-admin lane
+            (<code>SCHEMA_DATABASE_URL</code>) is used only by the
+            disabled-by-default admin/schema module. It connects as a
+            non-superuser, non-<code>BYPASSRLS</code> role that owns every table
+            it mutates; it may be the same PostgreSQL role as the migration role
+            but remains a separate request-time surface and is never the runtime
+            role. Create/alter leaves ownership on that owner; expose/unexpose
+            applies least-privilege runtime <code>GRANT</code>/<code
+              >REVOKE</code
+            >
+            and fails closed on missing grants; policy commands run only as the
+            owner, never via superuser escalation.
+          </li>
+          <li>
+            Schema operations are typed commands compiled by one audited DDL
+            layer; HTTP handlers never construct SQL; identifiers are
+            conservatively validated and quoted; values remain parameterised
+            where PostgreSQL permits; defaults come from a typed
+            allowlist/template model.
+          </li>
+          <li>
+            The v0.2 type allowlist is <code>text</code>, <code>integer</code>,
+            <code>bigint</code>, <code>boolean</code>, <code>uuid</code>,
+            <code>timestamp</code>, <code>timestamptz</code>, <code>date</code>,
+            <code>numeric</code>, <code>jsonb</code>.
+          </li>
+          <li>
+            Default templates are a typed literal,
+            <code>current_timestamp</code> (emitting
+            <code>CURRENT_TIMESTAMP</code> only for
+            <code>timestamp</code>/<code>timestamptz</code>), and
+            <code>random_uuid</code> (emitting
+            <code>gen_random_uuid()</code> only for <code>uuid</code>);
+            foreign-key actions are limited to <code>NO ACTION</code>,
+            <code>RESTRICT</code>, <code>CASCADE</code>, and
+            <code>SET NULL</code> (nullable referencing columns only), with no
+            <code>SET DEFAULT</code>.
+          </li>
+          <li>
+            A durable exposure registry separates “table exists” from “table is
+            exposed to the data API”, with a one-time migration from
+            <code>MICROJBASE_TABLES</code>; after import the registry is the
+            sole runtime exposure source — the environment variable cannot add
+            tables at runtime or re-expose a table an operator unexposed.
+          </li>
+          <li>
+            RLS management is limited to predefined ownership templates around
+            <code>microjbase.user_id</code>; arbitrary policy SQL is out of
+            scope.
+          </li>
+          <li>
+            The admin API lands last (V02-16..V02-18), after internal services
+            are stable. No GUI is in the queue.
+          </li>
+        </ul>
+
+        <h2>Compatibility</h2>
+        <p>
+          v0.1 HTTP API behaviour is unchanged by the v0.2 plan: existing auth
+          and data routes keep their contracts, v0.1 migrations remain
+          forward-only and immutable, and startup runtime-role checks keep their
+          fail-closed semantics.
+        </p>
+      </div>
+    </main>
+    <footer class="site">
+      <div class="wrap">
+        Static wiki: relative links only, no external assets, no JavaScript.
+        Rendered from the repository working tree at v0.2 intake.
+      </div>
+    </footer>
+  </body>
+</html>

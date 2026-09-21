@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>microJBase project wiki — roadmap</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site">
+      <div class="wrap">
+        <h1>microJBase project wiki</h1>
+        <nav class="wiki" aria-label="Wiki">
+          <ul>
+            <li><a href="index.html">Dashboard</a></li>
+            <li><a href="architecture.html">Architecture</a></li>
+            <li><a href="roadmap.html" aria-current="page">Roadmap</a></li>
+            <li><a href="reviews.html">Reviews</a></li>
+            <li><a href="security.html">Security</a></li>
+            <li><a href="api.html">API</a></li>
+            <li><a href="history.html">History</a></li>
+          </ul>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <div class="wrap">
+        <h2>v0.2 queue state</h2>
+        <p>
+          The v0.2 queue has 20 items (V02-00 through V02-19).
+          <strong
+            >V02-00 is complete; V02-01 is next — 1 of 20 merged (5%)</strong
+          >. One active implementation PR at a time; each merges only after
+          independent review with no unresolved BLOCKER/MAJOR and green CI.
+        </p>
+
+        <h2>Foundation</h2>
+        <table>
+          <caption>
+            Foundation item
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Item</th>
+              <th scope="col">Summary</th>
+              <th scope="col">State</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>V02-00</td>
+              <td>Direction, queue, and project wiki (documentation only)</td>
+              <td><span class="badge done">completed</span> PR #25</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Wave 1 — read-only schema introspection</h2>
+        <table>
+          <caption>
+            Wave 1 items
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Item</th>
+              <th scope="col">Summary</th>
+              <th scope="col">State</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>V02-01</td>
+              <td>Schema catalogue contracts and table/column reader</td>
+              <td><span class="badge queued">next</span></td>
+            </tr>
+            <tr>
+              <td>V02-02</td>
+              <td>Constraint and index introspection</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+            <tr>
+              <td>V02-03</td>
+              <td>Schema snapshot service and migration/exposure state</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Wave 2 — migration and safe-DDL foundation</h2>
+        <table>
+          <caption>
+            Wave 2 items
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Item</th>
+              <th scope="col">Summary</th>
+              <th scope="col">State</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>V02-04</td>
+              <td>Schema-admin connection and capability boundary</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+            <tr>
+              <td>V02-05</td>
+              <td>Durable schema-operation history and idempotency</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+            <tr>
+              <td>V02-06</td>
+              <td>Typed DDL planner/compiler and executor</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Wave 3 — table and column management</h2>
+        <table>
+          <caption>
+            Wave 3 items
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Item</th>
+              <th scope="col">Summary</th>
+              <th scope="col">State</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>V02-07</td>
+              <td>Create, rename, and drop tables</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+            <tr>
+              <td>V02-08</td>
+              <td>Add, rename, and drop columns</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+            <tr>
+              <td>V02-09</td>
+              <td>Defaults, nullability, and safe type changes</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Wave 4 — indexes, constraints, and API exposure</h2>
+        <table>
+          <caption>
+            Wave 4 items
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Item</th>
+              <th scope="col">Summary</th>
+              <th scope="col">State</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>V02-10</td>
+              <td>Durable API-exposure registry and compatibility migration</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+            <tr>
+              <td>V02-11</td>
+              <td>Index and unique-constraint management</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+            <tr>
+              <td>V02-12</td>
+              <td>Foreign-key and primary-key management</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+            <tr>
+              <td>V02-13</td>
+              <td>Expose/unexpose service and atomic registry refresh</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Wave 5 — RLS and ownership/security</h2>
+        <table>
+          <caption>
+            Wave 5 items
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Item</th>
+              <th scope="col">Summary</th>
+              <th scope="col">State</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>V02-14</td>
+              <td>RLS state management with fail-closed disable rules</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+            <tr>
+              <td>V02-15</td>
+              <td>Predefined user_id ownership policy templates</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Wave 6 — admin API hardening and GUI readiness</h2>
+        <table>
+          <caption>
+            Wave 6 items
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Item</th>
+              <th scope="col">Summary</th>
+              <th scope="col">State</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>V02-16</td>
+              <td>Operator authentication and isolated admin composition</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+            <tr>
+              <td>V02-17</td>
+              <td>Read-only admin schema and history HTTP API</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+            <tr>
+              <td>V02-18</td>
+              <td>Mutating admin schema HTTP API</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+            <tr>
+              <td>V02-19</td>
+              <td>v0.2 hardening, contract freeze, and release evidence</td>
+              <td><span class="badge queued">queued</span></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="muted">
+          Each item’s purpose, scope, dependencies, acceptance criteria, and
+          test expectations are frozen in
+          <code>docs/v0.2-implementation-plan.md</code>. Progress percentages on
+          this page are always stated against the 20-item denominator.
+        </p>
+      </div>
+    </main>
+    <footer class="site">
+      <div class="wrap">
+        Static wiki: relative links only, no external assets, no JavaScript.
+        Rendered from the repository working tree at v0.2 intake.
+      </div>
+    </footer>
+  </body>
+</html>

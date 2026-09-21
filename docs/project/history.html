@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>microJBase project wiki — history</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site">
+      <div class="wrap">
+        <h1>microJBase project wiki</h1>
+        <nav class="wiki" aria-label="Wiki">
+          <ul>
+            <li><a href="index.html">Dashboard</a></li>
+            <li><a href="architecture.html">Architecture</a></li>
+            <li><a href="roadmap.html">Roadmap</a></li>
+            <li><a href="reviews.html">Reviews</a></li>
+            <li><a href="security.html">Security</a></li>
+            <li><a href="api.html">API</a></li>
+            <li><a href="history.html" aria-current="page">History</a></li>
+          </ul>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <div class="wrap">
+        <h2>Milestones</h2>
+        <ol>
+          <li>
+            <strong>2026-09-19 — Documentation foundation.</strong> v0.1 scope
+            and non-goals frozen; architecture and module contracts frozen;
+            agent ownership and review workflow defined; API, auth, database,
+            and testing specifications written. Architecture decisions D-001
+            through D-009 accepted.
+          </li>
+          <li>
+            <strong>2026-09-19 — Skeleton and core.</strong> PR #14 scaffolded
+            the Node/TypeScript project and CI; PR #15 added core configuration,
+            errors, and lifecycle; PR #16 implemented the authentication domain
+            service; PR #17 implemented the data CRUD domain service.
+          </li>
+          <li>
+            <strong>2026-09-20 — PostgreSQL foundation and HTTP API.</strong>
+            PR #18 added the PostgreSQL foundation and migrations; PR #19
+            implemented the PostgreSQL authentication adapter; PR #20 added the
+            safe PostgreSQL CRUD and RLS adapter; PR #21 exposed the
+            authenticated HTTP CRUD API.
+          </li>
+          <li>
+            <strong>2026-09-21 — End-to-end acceptance.</strong> PR #22 added
+            the compiled-server v0.1 end-to-end acceptance suite.
+          </li>
+          <li>
+            <strong>2026-09-21 — Security hardening.</strong> PR #23 hardened
+            data ownership and RLS error handling, fixing one previously
+            identified MAJOR finding (RLS <code>42501</code> mapped to a safe
+            <code>409 CONFLICT</code> envelope); its GitHub review verdict was
+            SHIP with 0 blockers, 0 majors, 2 minors.
+          </li>
+          <li>
+            <strong>2026-09-21 — v0.1.0 released.</strong> PR #24 merged the
+            release documents; the <code>v0.1.0</code> tag was created on
+            <code>master</code> at commit <code>9413cfa</code> with 34 test
+            files / 352 tests green and latest base-commit CI green. PR #24 has
+            no GitHub review object.
+          </li>
+          <li>
+            <strong>2026-09-21 — v0.2 foundation completed.</strong> PR #25
+            merged V02-00: the schema-management scope, executable privilege
+            model, 20-item queue, and static project wiki. Grok 4.6 returned
+            SHIP after Kimi fixed one MAJOR and eight MINOR findings. Progress:
+            1 of 20 merged; V02-01 is next. Issues #10–#13 remain
+            administratively open.
+          </li>
+        </ol>
+      </div>
+    </main>
+    <footer class="site">
+      <div class="wrap">
+        Static wiki: relative links only, no external assets, no JavaScript.
+        Rendered from the repository working tree at v0.2 intake.
+      </div>
+    </footer>
+  </body>
+</html>

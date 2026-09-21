@@ -1,0 +1,290 @@
+/* microJBase project wiki — shared styles.
+   Framework-free, system fonts, no remote assets. Works from file://. */
+
+:root {
+  --bg: #f7f7f5;
+  --panel: #ffffff;
+  --ink: #1c1c1a;
+  --muted: #55554f;
+  --line: #c9c9c2;
+  --line-strong: #a3a39b;
+  --accent: #0b5fff;
+  --accent-ink: #ffffff;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --planned: #6f42c1;
+  --radius: 6px;
+  --max: 64rem;
+  --measure: 70ch;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+  line-height: 1.55;
+  font-size: 1rem;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+a:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--accent);
+  color: var(--accent-ink);
+  padding: 0.5rem 0.9rem;
+  z-index: 10;
+  border-radius: 0 0 var(--radius) 0;
+}
+
+.skip-link:focus {
+  left: 0;
+}
+
+header.site {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 0.9rem 1rem;
+}
+
+header.site .wrap,
+main .wrap,
+footer.site .wrap {
+  max-width: var(--max);
+  margin: 0 auto;
+}
+
+header.site h1 {
+  margin: 0 0 0.6rem;
+  font-size: 1.25rem;
+  letter-spacing: 0.01em;
+}
+
+nav.wiki {
+  font-size: 0.92rem;
+}
+
+nav.wiki ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+}
+
+nav.wiki li {
+  margin: 0;
+}
+
+nav.wiki a {
+  display: inline-block;
+  text-decoration: none;
+  padding: 0.6rem 0.55rem;
+  border-radius: 4px;
+}
+
+nav.wiki a:hover {
+  text-decoration: underline;
+}
+
+nav.wiki a[aria-current="page"] {
+  color: var(--ink);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+}
+
+main {
+  padding: 1.4rem 1rem 2.5rem;
+}
+
+main h2 {
+  font-size: 1.15rem;
+  margin: 1.8rem 0 0.5rem;
+}
+
+main h3 {
+  font-size: 1rem;
+  margin: 1.4rem 0 0.4rem;
+}
+
+main p {
+  margin: 0.55rem 0;
+  max-width: var(--measure);
+}
+
+main ul,
+main ol {
+  margin: 0.5rem 0 0.9rem;
+  padding-left: 1.3rem;
+}
+
+main li {
+  margin: 0.25rem 0;
+  max-width: var(--measure);
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem 1.1rem;
+  margin: 1rem 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  align-items: start;
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.8rem 0 1.2rem;
+  font-size: 0.92rem;
+}
+
+caption {
+  text-align: left;
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+}
+
+th,
+td {
+  border: 1px solid var(--line);
+  padding: 0.45rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: #efefeb;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  border: 1px solid var(--line-strong);
+  white-space: nowrap;
+  margin-right: 0.4rem;
+}
+
+.badge.done {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.badge.progress {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.badge.queued {
+  color: var(--muted);
+}
+
+.badge.planned {
+  color: var(--planned);
+  border-color: var(--planned);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  background: #efefeb;
+  border-radius: 3px;
+  padding: 0.08rem 0.3rem;
+}
+
+pre {
+  background: #24241f;
+  color: #f4f4ef;
+  border-radius: var(--radius);
+  padding: 0.8rem 1rem;
+  overflow-x: auto;
+  font-size: 0.88rem;
+}
+
+pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.note {
+  border-left: 4px solid var(--accent);
+  background: var(--panel);
+  padding: 0.6rem 0.9rem;
+  margin: 0.9rem 0;
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+footer.site {
+  border-top: 1px solid var(--line);
+  padding: 1rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+@media (max-width: 40rem) {
+  header.site h1 {
+    font-size: 1.1rem;
+  }
+
+  nav.wiki ul {
+    gap: 0.25rem 0.7rem;
+  }
+
+  main {
+    padding: 1rem 0.8rem 2rem;
+  }
+
+  th,
+  td {
+    padding: 0.35rem 0.45rem;
+  }
+}

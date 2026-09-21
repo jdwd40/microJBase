@@ -1,5 +1,7 @@
 # microJBase v0.1 Implementation Plan
 
+> Historical: this is the completed v0.1 implementation plan, kept for the record. The current implementation plan is [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md).
+
 This is the execution queue for building v0.1 with Hermes, OpenCode/Kimi, Grok reviewers, and a human/AI integrator.
 
 The GitHub issues are work orders. An implementation agent creates a branch and pull request only when it starts an issue. Empty pull requests are not pre-created because they become stale, hide dependency changes, and encourage agents to work from old versions of `master`.
