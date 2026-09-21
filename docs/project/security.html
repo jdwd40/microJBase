@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>microJBase project wiki — security</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site">
+      <div class="wrap">
+        <h1>microJBase project wiki</h1>
+        <nav class="wiki" aria-label="Wiki">
+          <ul>
+            <li><a href="index.html">Dashboard</a></li>
+            <li><a href="architecture.html">Architecture</a></li>
+            <li><a href="roadmap.html">Roadmap</a></li>
+            <li><a href="reviews.html">Reviews</a></li>
+            <li><a href="security.html" aria-current="page">Security</a></li>
+            <li><a href="api.html">API</a></li>
+            <li><a href="history.html">History</a></li>
+          </ul>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <div class="wrap">
+        <h2>Implemented v0.1 security boundaries</h2>
+        <ul>
+          <li>
+            The HTTP layer rejects malformed input and oversized bodies (default
+            maximum body size 1 MiB).
+          </li>
+          <li>
+            The table registry maps a public alias to a configured schema/table;
+            the client never supplies a raw SQL identifier.
+          </li>
+          <li>
+            Database metadata validates body keys as real writable columns
+            before identifiers are quoted.
+          </li>
+          <li>All SQL values use PostgreSQL parameters.</li>
+          <li>
+            Row-level security is the final row-level boundary and is enabled
+            and forced on every exposed table.
+          </li>
+          <li>
+            The runtime database role is non-superuser and
+            non-<code>BYPASSRLS</code>; the server refuses to start otherwise.
+          </li>
+          <li>
+            The <code>microjbase</code> internal schema can never be exposed by
+            the data API; <code>pg_catalog</code> and
+            <code>information_schema</code> are likewise excluded.
+          </li>
+          <li>
+            Logs never contain passwords or raw session tokens; sessions are
+            stored only as SHA-256 digests.
+          </li>
+          <li>
+            Argon2id password hashing with timing-consistent unknown-email
+            handling via a dummy verification.
+          </li>
+        </ul>
+
+        <h2>Fixed MAJOR finding (PR #23)</h2>
+        <p>
+          One MAJOR finding was identified and fixed before the v0.1 release: a
+          real RLS <code>42501</code> error on foreign-ownership create/update
+          was mapped to the generic safe <code>409 CONFLICT</code> envelope, so
+          no SQLSTATE, policy name, RLS wording, or table internals leak through
+          the public error body. The PR #23 GitHub review verified the fix and
+          returned SHIP with 0 blockers, 0 majors, 2 minors.
+        </p>
+
+        <h2>Known non-blocking limitations (recorded)</h2>
+        <p>
+          Deferred from the security review and recorded in
+          <code>docs/release-checklist.md</code>:
+        </p>
+        <ul>
+          <li>
+            No network-level “PostgreSQL unreachable” E2E harness (503 behaviour
+            is unit/integration covered instead).
+          </li>
+          <li>Rate-limiter eviction behaviour at maximum entries.</li>
+          <li>
+            Catch-all 404 uses <code>TABLE_NOT_FOUND</code> naming even for
+            non-table routes.
+          </li>
+          <li>Fastify’s default 415 mapping not customized.</li>
+          <li>
+            Runtime privilege-check placement could be factored into the
+            database module.
+          </li>
+          <li>No policy-expression introspection endpoint (by design).</li>
+          <li>
+            Client-supplied <code>updated_at</code> accepted on rows without an
+            ownership column.
+          </li>
+          <li>
+            Own-UUID ownership comparison is case-sensitive on some paths.
+          </li>
+          <li>
+            Broad <code>42501 → 409 CONFLICT</code> mapping in the data
+            repository (defence in depth; RLS is the real enforcement boundary).
+          </li>
+          <li>
+            Fastify <code>disableRequestLogging</code> is deprecated for Fastify
+            6; observed during v0.1, non-blocking for this documentation
+            milestone.
+          </li>
+        </ul>
+
+        <h2>Planned v0.2 admin boundary (not implemented)</h2>
+        <p class="note">
+          Everything in this section is planned capability. At v0.2 intake there
+          is no admin API, no schema mutation endpoint, and no GUI.
+        </p>
+        <ul>
+          <li>
+            Admin authorization is a single operator bearer token verified by a
+            configured SHA-256 digest
+            (<code>MICROJBASE_ADMIN_TOKEN_SHA256</code>) with constant-time
+            comparison; the raw token is never stored, logged, or accepted in
+            ordinary user/session auth.
+          </li>
+          <li>
+            The admin/schema module is opt-in and inert unless both a
+            schema-admin database URL and the token digest are configured; it
+            uses a separate <code>/v1/admin/schema</code> route tree, a small
+            bounded admin pool, and separate rate limiting.
+          </li>
+          <li>
+            Destructive schema commands require an explicit confirmation value
+            and refuse internal schemas and objects; an exposed table must be
+            unexposed before destructive mutation unless a narrowly documented
+            atomic operation says otherwise.
+          </li>
+          <li>
+            Schema operations are typed commands compiled by one audited DDL
+            layer; HTTP handlers never construct SQL; no arbitrary SQL endpoint
+            or migration SQL upload is introduced.
+          </li>
+          <li>
+            A third privilege lane (<code>SCHEMA_DATABASE_URL</code>) stays
+            separate from the runtime and migration roles and fails closed on
+            superuser, <code>BYPASSRLS</code>, or role-management rights.
+          </li>
+        </ul>
+      </div>
+    </main>
+    <footer class="site">
+      <div class="wrap">
+        Static wiki: relative links only, no external assets, no JavaScript.
+        Rendered from the repository working tree at v0.2 intake.
+      </div>
+    </footer>
+  </body>
+</html>

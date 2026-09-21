@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>microJBase project wiki — dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site">
+      <div class="wrap">
+        <h1>microJBase project wiki</h1>
+        <nav class="wiki" aria-label="Wiki">
+          <ul>
+            <li><a href="index.html" aria-current="page">Dashboard</a></li>
+            <li><a href="architecture.html">Architecture</a></li>
+            <li><a href="roadmap.html">Roadmap</a></li>
+            <li><a href="reviews.html">Reviews</a></li>
+            <li><a href="security.html">Security</a></li>
+            <li><a href="api.html">API</a></li>
+            <li><a href="history.html">History</a></li>
+          </ul>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <div class="wrap">
+        <p>
+          microJBase is a tiny self-hosted backend for apps that need users and
+          PostgreSQL — nothing more. This static wiki records only verified
+          repository state and clearly labels planned v0.2 work.
+        </p>
+
+        <h2>Verified baseline (v0.1)</h2>
+        <div class="grid">
+          <section class="panel" aria-labelledby="baseline-release">
+            <h3 id="baseline-release">Release</h3>
+            <ul>
+              <li>
+                Tag <code>v0.1.0</code> on primary branch <code>master</code>.
+              </li>
+              <li>
+                Base commit <code>9413cfa</code> (“release: prepare microJBase
+                v0.1 (#24)”).
+              </li>
+              <li>Latest GitHub Actions run on the base commit: success.</li>
+              <li>Node.js &ge; 22.13.0, PostgreSQL &ge; 16.</li>
+            </ul>
+          </section>
+          <section class="panel" aria-labelledby="baseline-tests">
+            <h3 id="baseline-tests">Tests</h3>
+            <ul>
+              <li>34 test files / 352 tests green.</li>
+              <li>Unit 206, integration 111, e2e 35.</li>
+              <li>
+                Local <code>npm ci</code>, <code>format:check</code>,
+                <code>typecheck</code>, <code>lint</code>, <code>build</code>,
+                and <code>npm test</code> all pass.
+              </li>
+            </ul>
+          </section>
+          <section class="panel" aria-labelledby="baseline-prs">
+            <h3 id="baseline-prs">Pull requests</h3>
+            <ul>
+              <li>11 merged implementation/release PRs: #14 through #24.</li>
+              <li>No open PRs at v0.2 intake.</li>
+              <li>Issues #10–#13 remain administratively open.</li>
+            </ul>
+          </section>
+        </div>
+
+        <h2>Current work</h2>
+        <p>
+          <span class="badge progress">in progress</span>
+          <strong>V02-00 — Direction, queue, and project wiki</strong>
+          (documentation only). This is the first of 20 queued v0.2 items, so
+          progress is 0 of 20 merged (0%).
+        </p>
+        <p>
+          The v0.2 queue and wave structure are on the
+          <a href="roadmap.html">roadmap page</a>. Scope and architecture
+          documents: <code>docs/v0.2-scope.md</code> and
+          <code>docs/v0.2-architecture.md</code> in the repository.
+        </p>
+
+        <h2>Latest review</h2>
+        <p>
+          The most recent GitHub review is on
+          <strong>PR #23</strong> (“fix: harden data ownership and RLS error
+          handling”), verdict <strong>SHIP</strong> with 0 blockers, 0 majors, 2
+          minors. It verified the fix for one previously identified MAJOR
+          finding (RLS <code>42501</code> mapped to a safe
+          <code>409 CONFLICT</code> envelope). PR #24 merged the v0.1 release
+          documents and has no GitHub review object. Full chronology:
+          <a href="reviews.html">reviews page</a>.
+        </p>
+
+        <h2>Implemented versus planned</h2>
+        <table>
+          <caption>
+            Capability state at v0.2 intake
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Capability</th>
+              <th scope="col">State</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Auth and data HTTP API (v0.1)</td>
+              <td><span class="badge done">implemented</span></td>
+            </tr>
+            <tr>
+              <td>Schema introspection (read-only)</td>
+              <td><span class="badge queued">queued</span> V02-01..V02-03</td>
+            </tr>
+            <tr>
+              <td>Typed DDL layer and operation history</td>
+              <td><span class="badge queued">queued</span> V02-04..V02-06</td>
+            </tr>
+            <tr>
+              <td>Table/column lifecycle commands</td>
+              <td><span class="badge queued">queued</span> V02-07..V02-09</td>
+            </tr>
+            <tr>
+              <td>Exposure registry, indexes, constraints</td>
+              <td><span class="badge queued">queued</span> V02-10..V02-13</td>
+            </tr>
+            <tr>
+              <td>RLS ownership policy templates</td>
+              <td><span class="badge queued">queued</span> V02-14..V02-15</td>
+            </tr>
+            <tr>
+              <td>Opt-in admin API under /v1/admin/schema</td>
+              <td><span class="badge queued">queued</span> V02-16..V02-18</td>
+            </tr>
+            <tr>
+              <td>v0.2 hardening and release evidence</td>
+              <td><span class="badge queued">queued</span> V02-19</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="muted">
+          Nothing under “queued” exists in the repository yet; the admin API,
+          schema mutation, and any GUI are strictly planned capabilities.
+        </p>
+
+        <h2>Links</h2>
+        <ul>
+          <li>
+            <a href="architecture.html"
+              >Architecture — v0.1 actual and v0.2 target</a
+            >
+          </li>
+          <li><a href="roadmap.html">Roadmap — the 20-item v0.2 queue</a></li>
+          <li><a href="reviews.html">Reviews — PR #14–#24 chronology</a></li>
+          <li>
+            <a href="security.html">Security — boundaries and findings</a>
+          </li>
+          <li>
+            <a href="api.html"
+              >API — implemented routes and planned admin routes</a
+            >
+          </li>
+          <li><a href="history.html">History — milestones</a></li>
+        </ul>
+      </div>
+    </main>
+    <footer class="site">
+      <div class="wrap">
+        Static wiki: relative links only, no external assets, no JavaScript.
+        Rendered from the repository working tree at v0.2 intake.
+      </div>
+    </footer>
+  </body>
+</html>

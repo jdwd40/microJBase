@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>microJBase project wiki — API</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site">
+      <div class="wrap">
+        <h1>microJBase project wiki</h1>
+        <nav class="wiki" aria-label="Wiki">
+          <ul>
+            <li><a href="index.html">Dashboard</a></li>
+            <li><a href="architecture.html">Architecture</a></li>
+            <li><a href="roadmap.html">Roadmap</a></li>
+            <li><a href="reviews.html">Reviews</a></li>
+            <li><a href="security.html">Security</a></li>
+            <li><a href="api.html" aria-current="page">API</a></li>
+            <li><a href="history.html">History</a></li>
+          </ul>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <div class="wrap">
+        <h2>Implemented v0.1 routes</h2>
+        <p>
+          These routes exist on <code>master</code> at the v0.1.0 tag. Base path
+          <code>/v1</code>; JSON is UTF-8. Source:
+          <code>docs/api-spec.md</code>.
+        </p>
+        <table>
+          <caption>
+            Implemented routes
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Method and path</th>
+              <th scope="col">Purpose</th>
+              <th scope="col">Auth</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>GET /health</code></td>
+              <td>Liveness and database readiness</td>
+              <td>None</td>
+            </tr>
+            <tr>
+              <td><code>POST /v1/auth/register</code></td>
+              <td>Register with email and password</td>
+              <td>None</td>
+            </tr>
+            <tr>
+              <td><code>POST /v1/auth/login</code></td>
+              <td>Login with email and password</td>
+              <td>None</td>
+            </tr>
+            <tr>
+              <td><code>POST /v1/auth/logout</code></td>
+              <td>Log out the current bearer session</td>
+              <td>Bearer session</td>
+            </tr>
+            <tr>
+              <td><code>GET /v1/auth/me</code></td>
+              <td>Resolve the current user</td>
+              <td>Bearer session</td>
+            </tr>
+            <tr>
+              <td><code>GET /v1/data/:table</code></td>
+              <td>List rows with limit/offset</td>
+              <td>Bearer session</td>
+            </tr>
+            <tr>
+              <td><code>GET /v1/data/:table/:id</code></td>
+              <td>Read one row by UUID id</td>
+              <td>Bearer session</td>
+            </tr>
+            <tr>
+              <td><code>POST /v1/data/:table</code></td>
+              <td>Insert a JSON object</td>
+              <td>Bearer session</td>
+            </tr>
+            <tr>
+              <td><code>PATCH /v1/data/:table/:id</code></td>
+              <td>Update one row by UUID id</td>
+              <td>Bearer session</td>
+            </tr>
+            <tr>
+              <td><code>DELETE /v1/data/:table/:id</code></td>
+              <td>Delete one row by UUID id</td>
+              <td>Bearer session</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          Only configured aliases such as <code>todos=public.todos</code> are
+          exposed. Table and column identifiers are never accepted blindly, and
+          SQL values are always parameterised.
+        </p>
+
+        <h2>Planned admin routes (not implemented)</h2>
+        <p class="note">
+          The routes below are planned v0.2 capabilities from
+          <code>docs/v0.2-implementation-plan.md</code>. They do not exist in
+          the repository at v0.2 intake and must not be treated as available.
+        </p>
+        <table>
+          <caption>
+            Planned admin route tree under /v1/admin/schema
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Planned surface</th>
+              <th scope="col">Planned availability</th>
+              <th scope="col">Restrictions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Operator capability/health probe</td>
+              <td>V02-16</td>
+              <td>
+                Operator bearer token only; module inert unless
+                <code>SCHEMA_DATABASE_URL</code> and
+                <code>MICROJBASE_ADMIN_TOKEN_SHA256</code> are configured.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                Read-only schema snapshots, table details, security state,
+                exposure state, operation history
+              </td>
+              <td>V02-17</td>
+              <td>
+                Ordinary sessions and unauthenticated callers must never reach
+                these endpoints.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                Mutating typed schema commands
+                (table/column/index/constraint/exposure/RLS)
+              </td>
+              <td>V02-18</td>
+              <td>
+                Requires idempotency keys and explicit destructive
+                confirmations; safe envelopes preserved; no SQL leakage.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Explicit restrictions</h2>
+        <ul>
+          <li>
+            There is no arbitrary SQL endpoint and no normal-client SQL endpoint
+            in v0.1, and v0.2 does not introduce one.
+          </li>
+          <li>
+            v0.1 has no admin or web dashboard, no email verification, no
+            OAuth/MFA, no file storage, no realtime, and no Supabase API
+            compatibility.
+          </li>
+          <li>
+            The internal <code>microjbase</code> schema is never exposed through
+            the data API.
+          </li>
+        </ul>
+      </div>
+    </main>
+    <footer class="site">
+      <div class="wrap">
+        Static wiki: relative links only, no external assets, no JavaScript.
+        Rendered from the repository working tree at v0.2 intake.
+      </div>
+    </footer>
+  </body>
+</html>

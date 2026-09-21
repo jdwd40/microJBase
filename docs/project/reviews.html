@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>microJBase project wiki — reviews</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site">
+      <div class="wrap">
+        <h1>microJBase project wiki</h1>
+        <nav class="wiki" aria-label="Wiki">
+          <ul>
+            <li><a href="index.html">Dashboard</a></li>
+            <li><a href="architecture.html">Architecture</a></li>
+            <li><a href="roadmap.html">Roadmap</a></li>
+            <li><a href="reviews.html" aria-current="page">Reviews</a></li>
+            <li><a href="security.html">Security</a></li>
+            <li><a href="api.html">API</a></li>
+            <li><a href="history.html">History</a></li>
+          </ul>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <div class="wrap">
+        <h2>Review chronology</h2>
+        <p>
+          Merged implementation and release PRs for v0.1, in merge order. Review
+          details are shown only where a GitHub review object exists; historical
+          severity counts not recorded in GitHub are marked
+          <em>not recorded</em> rather than invented.
+        </p>
+        <table>
+          <caption>
+            PR #14 through #24 (merged)
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">PR</th>
+              <th scope="col">Title</th>
+              <th scope="col">Merged (UTC)</th>
+              <th scope="col">Review state</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>#14</td>
+              <td>build: scaffold Node TypeScript project and CI</td>
+              <td>2026-09-19 19:26</td>
+              <td>No GitHub review object; severity counts not recorded.</td>
+            </tr>
+            <tr>
+              <td>#15</td>
+              <td>feat: add core configuration errors and lifecycle</td>
+              <td>2026-09-19 20:41</td>
+              <td>No GitHub review object; severity counts not recorded.</td>
+            </tr>
+            <tr>
+              <td>#16</td>
+              <td>feat: implement authentication domain service</td>
+              <td>2026-09-19 20:51</td>
+              <td>No GitHub review object; severity counts not recorded.</td>
+            </tr>
+            <tr>
+              <td>#17</td>
+              <td>feat: implement data CRUD domain service</td>
+              <td>2026-09-19 22:36</td>
+              <td>No GitHub review object; severity counts not recorded.</td>
+            </tr>
+            <tr>
+              <td>#18</td>
+              <td>feat: add PostgreSQL foundation and migrations</td>
+              <td>2026-09-20 06:52</td>
+              <td>No GitHub review object; severity counts not recorded.</td>
+            </tr>
+            <tr>
+              <td>#19</td>
+              <td>feat: implement PostgreSQL authentication adapter</td>
+              <td>2026-09-20 07:48</td>
+              <td>No GitHub review object; severity counts not recorded.</td>
+            </tr>
+            <tr>
+              <td>#20</td>
+              <td>feat: add safe PostgreSQL CRUD and RLS adapter</td>
+              <td>2026-09-20 09:50</td>
+              <td>No GitHub review object; severity counts not recorded.</td>
+            </tr>
+            <tr>
+              <td>#21</td>
+              <td>feat: expose authenticated HTTP CRUD API</td>
+              <td>2026-09-20 22:01</td>
+              <td>No GitHub review object; severity counts not recorded.</td>
+            </tr>
+            <tr>
+              <td>#22</td>
+              <td>test: add v0.1 end-to-end acceptance suite</td>
+              <td>2026-09-21 11:12</td>
+              <td>No GitHub review object; severity counts not recorded.</td>
+            </tr>
+            <tr>
+              <td>#23</td>
+              <td>fix: harden data ownership and RLS error handling</td>
+              <td>2026-09-21 12:35</td>
+              <td>
+                Adversarial review recorded on GitHub: verdict SHIP with 0
+                blockers, 0 majors, 2 minors. Verified the fix for one
+                previously identified MAJOR (RLS <code>42501</code> mapped to a
+                safe <code>409 CONFLICT</code> envelope) plus ownership
+                hardening and missing-auth E2E checks.
+              </td>
+            </tr>
+            <tr>
+              <td>#24</td>
+              <td>release: prepare microJBase v0.1</td>
+              <td>2026-09-21 13:56</td>
+              <td>Merged with release docs; no GitHub review object.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="muted">
+          Earlier v0.1 planning issues #10–#13 (adversarial audit, compliance
+          audit, security findings, release readiness) remain administratively
+          open; their work is represented by merged PRs #23 and #24.
+        </p>
+        <p class="muted">
+          This page does not claim that any historical review used a particular
+          reviewer unless a GitHub review object says so.
+        </p>
+      </div>
+    </main>
+    <footer class="site">
+      <div class="wrap">
+        Static wiki: relative links only, no external assets, no JavaScript.
+        Rendered from the repository working tree at v0.2 intake.
+      </div>
+    </footer>
+  </body>
+</html>
