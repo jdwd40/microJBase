@@ -47,6 +47,15 @@ See [docs/v0.1-scope.md](docs/v0.1-scope.md) for the frozen milestone.
 
 There is no PostgREST, JWT service, Redis, message broker, or frontend in v0.1.
 
+## Documentation
+
+- [docs/api-spec.md](docs/api-spec.md) — HTTP request/response contract.
+- [docs/database-spec.md](docs/database-spec.md) — PostgreSQL schema, roles, RLS, migrations.
+- [docs/deployment.md](docs/deployment.md) — reproducible systemd + nginx deployment.
+- [docs/operations.md](docs/operations.md) — backup, restore, and upgrade procedures.
+- [docs/benchmarks.md](docs/benchmarks.md) — measured startup, RSS, and load evidence (reproducible via `scripts/benchmark.ts`).
+- [docs/release-checklist.md](docs/release-checklist.md) and [docs/release-notes-v0.1.md](docs/release-notes-v0.1.md) — v0.1 release evidence.
+
 ## Architecture
 
 microJBase is a modular monolith: one deployable server with strict internal boundaries.
