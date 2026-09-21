@@ -6,7 +6,8 @@
   --panel: #ffffff;
   --ink: #1c1c1a;
   --muted: #55554f;
-  --line: #d9d9d4;
+  --line: #c9c9c2;
+  --line-strong: #a3a39b;
   --accent: #0b5fff;
   --accent-ink: #ffffff;
   --ok: #1a7f37;
@@ -14,6 +15,7 @@
   --planned: #6f42c1;
   --radius: 6px;
   --max: 64rem;
+  --measure: 70ch;
 }
 
 * {
@@ -108,9 +110,10 @@ nav.wiki li {
 }
 
 nav.wiki a {
+  display: inline-block;
   text-decoration: none;
-  padding: 0.15rem 0.1rem;
-  border-radius: 3px;
+  padding: 0.6rem 0.55rem;
+  border-radius: 4px;
 }
 
 nav.wiki a:hover {
@@ -140,6 +143,7 @@ main h3 {
 
 main p {
   margin: 0.55rem 0;
+  max-width: var(--measure);
 }
 
 main ul,
@@ -150,6 +154,7 @@ main ol {
 
 main li {
   margin: 0.25rem 0;
+  max-width: var(--measure);
 }
 
 .panel {
@@ -163,6 +168,7 @@ main li {
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  align-items: start;
   gap: 1rem;
   margin: 1rem 0;
 }
@@ -198,8 +204,9 @@ th {
   font-weight: 600;
   border-radius: 999px;
   padding: 0.1rem 0.55rem;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   white-space: nowrap;
+  margin-right: 0.4rem;
 }
 
 .badge.done {

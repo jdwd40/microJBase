@@ -28,95 +28,192 @@
       <div class="wrap">
         <h2>Review chronology</h2>
         <p>
-          Merged implementation and release PRs for v0.1, in merge order. Review
-          details are shown only where a GitHub review object exists; historical
-          severity counts not recorded in GitHub are marked
-          <em>not recorded</em> rather than invented.
+          Merged implementation and release PRs for v0.1, in merge order. GitHub
+          holds review objects (all state COMMENTED) on every merged PR from #14
+          through #23; PR #24 merged with none. The final recorded verdict is
+          shown for each PR, with blocker/major counts quoted only where a
+          review states them explicitly. Facts absent from the review text are
+          marked <em>not recorded</em> rather than invented.
         </p>
         <table>
           <caption>
-            PR #14 through #24 (merged)
+            PR #14 through #24 (merged), with merge SHAs and final recorded
+            review state
           </caption>
           <thead>
             <tr>
               <th scope="col">PR</th>
-              <th scope="col">Title</th>
+              <th scope="col">Wave</th>
+              <th scope="col">Title / purpose</th>
               <th scope="col">Merged (UTC)</th>
-              <th scope="col">Review state</th>
+              <th scope="col">Final recorded review</th>
+              <th scope="col">Merge SHA</th>
             </tr>
           </thead>
           <tbody>
             <tr>
               <td>#14</td>
+              <td>Wave 1 (PR-01)</td>
               <td>build: scaffold Node TypeScript project and CI</td>
               <td>2026-09-19 19:26</td>
-              <td>No GitHub review object; severity counts not recorded.</td>
+              <td>
+                One GitHub review (Grok Green compliance/regression). Verdict
+                <strong>SHIP</strong>; counts stated explicitly: 0 blockers, 0
+                majors, 2 minors, 5 notes. No fixes required before merge;
+                minors covered early-locked runtime deps and a toolchain-proof
+                module outside the sketched layout.
+              </td>
+              <td><code>f84a6a65c3689fd15eb2f5a268c25c48a41c15c3</code></td>
             </tr>
             <tr>
               <td>#15</td>
+              <td>Wave 2 (PR-02)</td>
               <td>feat: add core configuration errors and lifecycle</td>
               <td>2026-09-19 20:41</td>
-              <td>No GitHub review object; severity counts not recorded.</td>
+              <td>
+                One GitHub review (compliance/security). Verdict
+                <strong>SHIP</strong>; states “No blockers or majors.” Prior
+                Codex items verified fixed: contract revert, structural
+                <code>AppError</code> recognition with 400–599 statuses,
+                expanded secret redaction, listener-safe shutdown uninstall,
+                generic shutdown logs.
+              </td>
+              <td><code>2e22645e60b286f7447b23c15fbf39b62d3b7209</code></td>
             </tr>
             <tr>
               <td>#16</td>
+              <td>Wave 2 (PR-03)</td>
               <td>feat: implement authentication domain service</td>
               <td>2026-09-19 20:51</td>
-              <td>No GitHub review object; severity counts not recorded.</td>
+              <td>
+                One GitHub review (compliance/security). Verdict
+                <strong>SHIP</strong> (15/15 criteria pass); blocker/major
+                counts not recorded. Prior Codex findings verified fixed:
+                Unicode code-point password length; Cc control rejection in
+                passwords/emails.
+              </td>
+              <td><code>baee15b750a33c8ad5a2ecde8758733d2ffaf6f3</code></td>
             </tr>
             <tr>
               <td>#17</td>
+              <td>Wave 2 (PR-04)</td>
               <td>feat: implement data CRUD domain service</td>
               <td>2026-09-19 22:36</td>
-              <td>No GitHub review object; severity counts not recorded.</td>
+              <td>
+                One GitHub review (combined compliance/security). Verdict
+                <strong>SHIP</strong>; states “No blockers or majors.” Codex
+                follow-up fix verified holding: JSON boundary validation and
+                <code>__proto__</code> rejection via
+                <code>Object.fromEntries</code>.
+              </td>
+              <td><code>3ccbae570d6f31228f67071236f00ee4f33b3f66</code></td>
             </tr>
             <tr>
               <td>#18</td>
+              <td>Wave 2 (PR-05)</td>
               <td>feat: add PostgreSQL foundation and migrations</td>
               <td>2026-09-20 06:52</td>
-              <td>No GitHub review object; severity counts not recorded.</td>
+              <td>
+                Seven GitHub review objects across Codex and Grok rounds; final
+                review verdict <strong>SHIP</strong>, stating “Blockers: none.
+                Majors: none remaining.” Important fixes recorded across the
+                review chain: CI PostgreSQL 16 service with separate
+                <code>dropdb</code>/<code>createdb</code> bootstrap; fail-closed
+                runtime grant checks (<code>has_schema_privilege</code> /
+                <code>has_table_privilege</code>) and role-aware RLS policy
+                validation; least-privilege runtime grants; pool idle-error
+                logging without connection topology; transaction errors routed
+                through the central <code>translatePoolError</code>.
+              </td>
+              <td><code>ae0fa04e78cfae64d68aec70e05df291931a165d</code></td>
             </tr>
             <tr>
               <td>#19</td>
+              <td>Wave 3 (PR-06)</td>
               <td>feat: implement PostgreSQL authentication adapter</td>
               <td>2026-09-20 07:48</td>
-              <td>No GitHub review object; severity counts not recorded.</td>
+              <td>
+                Two GitHub reviews (adversarial/compliance). First verdict
+                CHANGES REQUESTED (two majors: missing
+                <code>token_hash</code> UNIQUE; overly broad 23505 mapping);
+                final re-audit verdict <strong>SHIP</strong>, stating “No new
+                blockers or majors.” Fixes: migration 0003 adds UNIQUE on
+                <code>sessions.token_hash</code>;
+                <code>EMAIL_ALREADY_REGISTERED</code> only for 23505 with
+                constraint <code>users_email_key</code>.
+              </td>
+              <td><code>79aec80a10056676d8d31acccc1aef48030068ea</code></td>
             </tr>
             <tr>
               <td>#20</td>
+              <td>Wave 3 (PR-07)</td>
               <td>feat: add safe PostgreSQL CRUD and RLS adapter</td>
               <td>2026-09-20 09:50</td>
-              <td>No GitHub review object; severity counts not recorded.</td>
+              <td>
+                Two GitHub reviews (adversarial/compliance). First verdict
+                CHANGES REQUESTED (one major: empty
+                <code>create({})</code> reached SQL); final verdict
+                <strong>SHIP</strong>; counts stated explicitly: 0 blockers, 0
+                majors, 4 minors. Fix: empty <code>create({})</code> rejected as
+                <code>VALIDATION_ERROR</code> before any SQL (tx=0, q=0) with a
+                non-vacuous regression test.
+              </td>
+              <td><code>533b0bdb04dc0a49cdbc785ccbd46a1f2b47fc94</code></td>
             </tr>
             <tr>
               <td>#21</td>
+              <td>Wave 4 (PR-08)</td>
               <td>feat: expose authenticated HTTP CRUD API</td>
               <td>2026-09-20 22:01</td>
-              <td>No GitHub review object; severity counts not recorded.</td>
+              <td>
+                Two GitHub reviews (adversarial). First verdict CHANGES
+                REQUESTED (0 blockers / 1 major / 3 minors: missing
+                <code>Cache-Control: no-store</code> on Fastify pre-route auth
+                errors); final verdict <strong>SHIP</strong>; counts stated
+                explicitly: 0 blockers, 0 majors. Fix:
+                <code>onSend</code> applies
+                <code>Cache-Control: no-store</code> to every
+                <code>/v1/auth</code> response, covering pre-route failures.
+              </td>
+              <td><code>bc528fd94a995a1ea382b2df1b8960edf759845d</code></td>
             </tr>
             <tr>
               <td>#22</td>
+              <td>Wave 4 (PR-09)</td>
               <td>test: add v0.1 end-to-end acceptance suite</td>
               <td>2026-09-21 11:12</td>
-              <td>No GitHub review object; severity counts not recorded.</td>
+              <td>
+                One GitHub review (adversarial e2e). Verdict
+                <strong>SHIP</strong>; the review records 2 MAJORs as
+                non-blocking follow-ups (missing-authorization data-route e2e
+                cases; DB-down scram documentation), to be ticketed rather than
+                blocking a test-only merge. Blocker counts not recorded.
+              </td>
+              <td><code>0578dc497a5054c2f3d5da8f3e323dfa83f72684</code></td>
             </tr>
             <tr>
               <td>#23</td>
+              <td>Wave 5 (hardening)</td>
               <td>fix: harden data ownership and RLS error handling</td>
               <td>2026-09-21 12:35</td>
               <td>
-                Adversarial review recorded on GitHub: verdict SHIP with 0
-                blockers, 0 majors, 2 minors. Verified the fix for one
-                previously identified MAJOR (RLS <code>42501</code> mapped to a
-                safe <code>409 CONFLICT</code> envelope) plus ownership
-                hardening and missing-auth E2E checks.
+                One GitHub review (adversarial). Verdict <strong>SHIP</strong>;
+                counts stated explicitly: 0 blockers, 0 majors, 2 minors. M1
+                fixed: real RLS <code>42501</code> on foreign-ownership writes
+                mapped to the generic safe <code>409 CONFLICT</code>
+                envelope; ownership hardening and missing-auth E2E verified.
               </td>
+              <td><code>d60add82f522e9a640876da3fe21e4ad59f9e2c9</code></td>
             </tr>
             <tr>
               <td>#24</td>
+              <td>Wave 5 (release)</td>
               <td>release: prepare microJBase v0.1</td>
               <td>2026-09-21 13:56</td>
-              <td>Merged with release docs; no GitHub review object.</td>
+              <td>
+                No GitHub review object. Final recorded verdict: not recorded.
+              </td>
+              <td><code>9413cfa2b36624cd707f8dd371a3c29e1efae78c</code></td>
             </tr>
           </tbody>
         </table>
@@ -126,7 +223,8 @@
           open; their work is represented by merged PRs #23 and #24.
         </p>
         <p class="muted">
-          This page does not claim that any historical review used a particular
+          All review objects cited above are in GitHub state COMMENTED. This
+          page does not claim that any historical review used a particular
           reviewer unless a GitHub review object says so.
         </p>
       </div>
