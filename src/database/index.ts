@@ -1,4 +1,5 @@
-// Public database entry point for microJBase v0.1.
+// Public database entry point for microJBase (v0.1 plus the v0.2 schema
+// catalogue reader).
 //
 // Exports the pool and transaction helpers. Repository adapters and the
 // migration runner live in sibling files and are imported by their callers.

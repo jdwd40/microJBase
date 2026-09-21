@@ -1,13 +1,17 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import pg from "pg"
 
-import { createSchemaCatalogueReader } from "../../../src/database/index.js"
+import {
+  createSchemaCatalogueReader,
+  type SchemaCatalogueDependencies,
+} from "../../../src/database/index.js"
 import type {
   SchemaCatalogue,
   SchemaCatalogueColumn,
   SchemaCatalogueSchema,
   SchemaCatalogueTable,
 } from "../../../src/contracts/index.js"
+import { quoteLiteral } from "./helpers.js"
 import {
   applyMigrationsAndGrants,
   cleanMigrations,
@@ -35,23 +39,48 @@ const APP_SCHEMA = "v0201_app"
 const WEIRD_SCHEMA = "V0201 Weird Schema"
 const FIXTURE_SCHEMAS = [EMPTY_SCHEMA, APP_SCHEMA, WEIRD_SCHEMA] as const
 
+// Set in beforeAll: PostgreSQL 18 adds virtual generated columns
+// (attgenerated 'v'); the fixture and assertions are conditional on it so
+// PostgreSQL 16 CI remains valid.
+let supportsVirtualGenerated = false
+
 async function withAdminClient<T>(fn: (client: pg.Client) => Promise<T>) {
   return withClient(adminDatabaseUrl as string, fn)
 }
 
+// Test-only identifier quoting for fixture DDL. Fixture names above are
+// fixed, but quoting stays defensive so the setup cannot be diverted.
+function quoteIdent(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`
+}
+
 async function createFixtures(): Promise<void> {
   await withAdminClient(async (admin) => {
-    await admin.query(`DROP SCHEMA IF EXISTS ${quoteLit(WEIRD_SCHEMA)} CASCADE`)
-    await admin.query(`DROP SCHEMA IF EXISTS ${APP_SCHEMA} CASCADE`)
-    await admin.query(`DROP SCHEMA IF EXISTS ${EMPTY_SCHEMA} CASCADE`)
-
-    await admin.query(`CREATE SCHEMA ${quoteLit(EMPTY_SCHEMA)}`)
-    await admin.query(`CREATE SCHEMA ${APP_SCHEMA}`)
-    await admin.query(
-      `CREATE DOMAIN ${APP_SCHEMA}.postal_code AS text CHECK (VALUE ~ '^[0-9]{5}$')`,
+    const version = await admin.query(
+      "SELECT current_setting('server_version_num') AS server_version_num",
     )
+    supportsVirtualGenerated =
+      Number.parseInt(version.rows[0]?.server_version_num as string, 10) >=
+      180000
+
+    await admin.query(
+      `DROP SCHEMA IF EXISTS ${quoteIdent(WEIRD_SCHEMA)} CASCADE`,
+    )
+    await admin.query(`DROP SCHEMA IF EXISTS ${quoteIdent(APP_SCHEMA)} CASCADE`)
+    await admin.query(
+      `DROP SCHEMA IF EXISTS ${quoteIdent(EMPTY_SCHEMA)} CASCADE`,
+    )
+
+    await admin.query(`CREATE SCHEMA ${quoteIdent(EMPTY_SCHEMA)}`)
+    await admin.query(`CREATE SCHEMA ${quoteIdent(APP_SCHEMA)}`)
+    await admin.query(
+      `CREATE DOMAIN ${quoteIdent(APP_SCHEMA)}.postal_code AS text CHECK (VALUE ~ '^[0-9]{5}$')`,
+    )
+    const virtualColumn = supportsVirtualGenerated
+      ? ",\n        title_len_virtual integer GENERATED ALWAYS AS (length(title)) VIRTUAL"
+      : ""
     await admin.query(`
-      CREATE TABLE ${APP_SCHEMA}.articles (
+      CREATE TABLE ${quoteIdent(APP_SCHEMA)}.articles (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         title text NOT NULL,
         body text,
@@ -59,46 +88,53 @@ async function createFixtures(): Promise<void> {
         created_at timestamptz NOT NULL DEFAULT now(),
         seq integer GENERATED ALWAYS AS IDENTITY,
         slug_length integer GENERATED ALWAYS AS (length(title)) STORED,
-        postal ${APP_SCHEMA}.postal_code DEFAULT '12345'::${APP_SCHEMA}.postal_code
+        postal ${quoteIdent(APP_SCHEMA)}.postal_code DEFAULT '12345'::${quoteIdent(APP_SCHEMA)}.postal_code${virtualColumn}
       )
     `)
     await admin.query(`
-      CREATE TABLE ${APP_SCHEMA}.metrics (
+      CREATE TABLE ${quoteIdent(APP_SCHEMA)}.metrics (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id uuid,
         value integer
       )
     `)
     await admin.query(
-      `ALTER TABLE ${APP_SCHEMA}.metrics ENABLE ROW LEVEL SECURITY`,
+      `ALTER TABLE ${quoteIdent(APP_SCHEMA)}.metrics ENABLE ROW LEVEL SECURITY`,
     )
     await admin.query(
-      `ALTER TABLE ${APP_SCHEMA}.metrics FORCE ROW LEVEL SECURITY`,
+      `ALTER TABLE ${quoteIdent(APP_SCHEMA)}.metrics FORCE ROW LEVEL SECURITY`,
     )
     await admin.query(`
-      CREATE TABLE ${APP_SCHEMA}.events (
+      CREATE TABLE ${quoteIdent(APP_SCHEMA)}.events (
         id uuid NOT NULL,
         occurred_at timestamptz NOT NULL,
         payload jsonb
       ) PARTITION BY RANGE (occurred_at)
     `)
+    await admin.query(`
+      CREATE TABLE ${quoteIdent(APP_SCHEMA)}.events_2026
+      PARTITION OF ${quoteIdent(APP_SCHEMA)}.events
+      FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')
+    `)
+    // Zero-column tables are valid PostgreSQL objects and must be reported.
+    await admin.query(`CREATE TABLE ${quoteIdent(APP_SCHEMA)}.no_columns ()`)
 
     // Non-table objects must never appear in the catalogue.
     await admin.query(
-      `CREATE VIEW ${APP_SCHEMA}.articles_view AS SELECT id, title FROM ${APP_SCHEMA}.articles`,
+      `CREATE VIEW ${quoteIdent(APP_SCHEMA)}.articles_view AS SELECT id, title FROM ${quoteIdent(APP_SCHEMA)}.articles`,
     )
     await admin.query(`
-      CREATE MATERIALIZED VIEW ${APP_SCHEMA}.articles_mv AS
-      SELECT id, title FROM ${APP_SCHEMA}.articles
+      CREATE MATERIALIZED VIEW ${quoteIdent(APP_SCHEMA)}.articles_mv AS
+      SELECT id, title FROM ${quoteIdent(APP_SCHEMA)}.articles
     `)
-    await admin.query(`CREATE SEQUENCE ${APP_SCHEMA}.articles_seq`)
+    await admin.query(`CREATE SEQUENCE ${quoteIdent(APP_SCHEMA)}.articles_seq`)
 
-    await admin.query(`CREATE SCHEMA ${quoteLit(WEIRD_SCHEMA)}`)
+    await admin.query(`CREATE SCHEMA ${quoteIdent(WEIRD_SCHEMA)}`)
     await admin.query(`
-      CREATE TABLE ${quoteLit(WEIRD_SCHEMA)}.${quoteLit('weird "table" name')} (
-        ${quoteLit("sp ace")} text,
-        ${quoteLit('quo"te')} integer DEFAULT 7,
-        ${quoteLit("-- DROP TABLE users;")} text DEFAULT ''';--'
+      CREATE TABLE ${quoteIdent(WEIRD_SCHEMA)}.${quoteIdent('weird "table" name')} (
+        ${quoteIdent("sp ace")} text,
+        ${quoteIdent('quo"te')} integer DEFAULT 7,
+        ${quoteIdent("-- DROP TABLE users;")} text DEFAULT ''';--'
       )
     `)
   })
@@ -106,40 +142,49 @@ async function createFixtures(): Promise<void> {
 
 async function dropFixtures(): Promise<void> {
   await withAdminClient(async (admin) => {
-    await admin.query(`DROP SCHEMA IF EXISTS ${quoteLit(WEIRD_SCHEMA)} CASCADE`)
-    await admin.query(`DROP SCHEMA IF EXISTS ${APP_SCHEMA} CASCADE`)
-    await admin.query(`DROP SCHEMA IF EXISTS ${EMPTY_SCHEMA} CASCADE`)
+    await admin.query(
+      `DROP SCHEMA IF EXISTS ${quoteIdent(WEIRD_SCHEMA)} CASCADE`,
+    )
+    await admin.query(`DROP SCHEMA IF EXISTS ${quoteIdent(APP_SCHEMA)} CASCADE`)
+    await admin.query(
+      `DROP SCHEMA IF EXISTS ${quoteIdent(EMPTY_SCHEMA)} CASCADE`,
+    )
   })
-}
-
-// Test-only identifier quoting for fixture DDL. Fixture names above are
-// fixed, but quoting stays defensive so the setup cannot be diverted.
-function quoteLit(name: string): string {
-  return `"${name.replace(/"/g, '""')}"`
 }
 
 interface CatalogueState {
   objects: unknown[]
   domains: unknown[]
+  catalogueCounts: unknown[]
   migrations: unknown[]
   fixtureData: unknown[]
 }
 
 async function captureState(admin: pg.Client): Promise<CatalogueState> {
+  const fixtureSchemaLiterals = FIXTURE_SCHEMAS.map((s) =>
+    quoteLiteral(s),
+  ).join(",")
   const objects = await admin.query(`
     SELECT n.nspname, c.relname, c.relkind, c.relrowsecurity,
            c.relforcerowsecurity
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname IN (${FIXTURE_SCHEMAS.map((s) => `'${s}'`).join(",")})
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname IN (${fixtureSchemaLiterals})
     ORDER BY n.nspname, c.relname
   `)
   const domains = await admin.query(`
     SELECT t.typname
-    FROM pg_type t
-    JOIN pg_namespace n ON n.oid = t.typnamespace
-    WHERE n.nspname = '${APP_SCHEMA}' AND t.typtype = 'd'
+    FROM pg_catalog.pg_type t
+    JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+    WHERE n.nspname = ${quoteLiteral(APP_SCHEMA)} AND t.typtype = 'd'
     ORDER BY t.typname
+  `)
+  // Database-wide catalogue counts: any catalogue mutation anywhere in the
+  // database is caught, not just fixture-schema objects.
+  const catalogueCounts = await admin.query(`
+    SELECT (SELECT count(*) FROM pg_catalog.pg_namespace) AS namespaces,
+           (SELECT count(*) FROM pg_catalog.pg_class) AS classes,
+           (SELECT count(*) FROM pg_catalog.pg_attrdef) AS attrdefs
   `)
   const migrations = await admin.query(`
     SELECT filename, checksum, applied_at
@@ -147,20 +192,21 @@ async function captureState(admin: pg.Client): Promise<CatalogueState> {
     ORDER BY filename
   `)
   const articles = await admin.query(
-    `SELECT * FROM ${APP_SCHEMA}.articles ORDER BY id`,
+    `SELECT * FROM ${quoteIdent(APP_SCHEMA)}.articles ORDER BY id`,
   )
   const metrics = await admin.query(
-    `SELECT * FROM ${APP_SCHEMA}.metrics ORDER BY id`,
+    `SELECT * FROM ${quoteIdent(APP_SCHEMA)}.metrics ORDER BY id`,
   )
   const events = await admin.query(
-    `SELECT * FROM ${APP_SCHEMA}.events ORDER BY id`,
+    `SELECT * FROM ${quoteIdent(APP_SCHEMA)}.events ORDER BY id`,
   )
   const weird = await admin.query(
-    `SELECT * FROM ${quoteLit(WEIRD_SCHEMA)}.${quoteLit('weird "table" name')}`,
+    `SELECT * FROM ${quoteIdent(WEIRD_SCHEMA)}.${quoteIdent('weird "table" name')}`,
   )
   return {
     objects: objects.rows,
     domains: domains.rows,
+    catalogueCounts: catalogueCounts.rows,
     migrations: migrations.rows,
     fixtureData: [articles.rows, metrics.rows, events.rows, weird.rows],
   }
@@ -182,6 +228,12 @@ function findTable(
   const table = schema.tables.find((entry) => entry.name === name)
   expect(table, `table ${name} should exist`).toBeDefined()
   return table as SchemaCatalogueTable
+}
+
+function findColumn(table: SchemaCatalogueTable, name: string) {
+  const column = table.columns.find((entry) => entry.name === name)
+  expect(column, `column ${name} should exist`).toBeDefined()
+  return column as SchemaCatalogueColumn
 }
 
 describe("schema catalogue reader (real PostgreSQL)", () => {
@@ -226,6 +278,14 @@ describe("schema catalogue reader (real PostgreSQL)", () => {
     expect(findSchema(catalogue, EMPTY_SCHEMA).tables).toEqual([])
   })
 
+  it("represents a zero-column table with an empty column list", async () => {
+    const catalogue = await readCatalogue()
+    const table = findTable(findSchema(catalogue, APP_SCHEMA), "no_columns")
+
+    expect(table.kind).toBe("regular")
+    expect(table.columns).toEqual([])
+  })
+
   it("represents ordinary tables with accurate column metadata", async () => {
     const catalogue = await readCatalogue()
     const table = findTable(findSchema(catalogue, APP_SCHEMA), "articles")
@@ -235,8 +295,7 @@ describe("schema catalogue reader (real PostgreSQL)", () => {
     expect(table.hasRowSecurity).toBe(false)
     expect(table.hasForcedRowSecurity).toBe(false)
 
-    const byName = new Map(table.columns.map((c) => [c.name, c]))
-    expect(table.columns.map((c) => c.name)).toEqual([
+    const expectedNames = [
       "id",
       "title",
       "body",
@@ -245,10 +304,16 @@ describe("schema catalogue reader (real PostgreSQL)", () => {
       "seq",
       "slug_length",
       "postal",
-    ])
-    expect(table.columns.map((c) => c.ordinal)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8,
-    ])
+    ]
+    if (supportsVirtualGenerated) {
+      expectedNames.push("title_len_virtual")
+    }
+    expect(table.columns.map((c) => c.name)).toEqual(expectedNames)
+    expect(table.columns.map((c) => c.ordinal)).toEqual(
+      expectedNames.map((_, index) => index + 1),
+    )
+
+    const byName = new Map(table.columns.map((c) => [c.name, c]))
 
     const id = byName.get("id") as SchemaCatalogueColumn
     expect(id).toMatchObject({
@@ -299,6 +364,31 @@ describe("schema catalogue reader (real PostgreSQL)", () => {
     })
   })
 
+  it("reports virtual generated columns on PostgreSQL 18+", async () => {
+    const catalogue = await readCatalogue()
+    const table = findTable(findSchema(catalogue, APP_SCHEMA), "articles")
+
+    if (!supportsVirtualGenerated) {
+      // PostgreSQL 16 CI: virtual generated columns do not exist there.
+      expect(table.columns.map((c) => c.name)).not.toContain(
+        "title_len_virtual",
+      )
+      return
+    }
+
+    const virtual = findColumn(table, "title_len_virtual")
+    expect(virtual).toMatchObject({
+      isNullable: true,
+      generated: "virtual",
+      identity: "none",
+      renderedType: "integer",
+      type: { schema: "pg_catalog", name: "int4", kind: "base" },
+      baseType: null,
+      // A generation expression is never a default.
+      defaultExpression: null,
+    })
+  })
+
   it("reports RLS and FORCE RLS state accurately", async () => {
     const catalogue = await readCatalogue()
     const app = findSchema(catalogue, APP_SCHEMA)
@@ -325,10 +415,25 @@ describe("schema catalogue reader (real PostgreSQL)", () => {
     expect(events.columns[2]?.renderedType).toBe("jsonb")
   })
 
-  it("preserves domain identity and underlying base type", async () => {
+  it("reports an attached partition child as a separate regular table", async () => {
+    const catalogue = await readCatalogue()
+    const child = findTable(findSchema(catalogue, APP_SCHEMA), "events_2026")
+
+    // Attached partitions have pg_class.relkind 'r'; until partition
+    // classification lands, the catalogue reports them as regular tables
+    // (see CONTRACTS.md and the PR design notes).
+    expect(child.kind).toBe("regular")
+    expect(child.columns.map((c) => c.name)).toEqual([
+      "id",
+      "occurred_at",
+      "payload",
+    ])
+  })
+
+  it("preserves domain identity and the immediate base type", async () => {
     const catalogue = await readCatalogue()
     const table = findTable(findSchema(catalogue, APP_SCHEMA), "articles")
-    const postal = table.columns.find((c) => c.name === "postal")
+    const postal = findColumn(table, "postal")
 
     expect(postal).toMatchObject({
       isNullable: true,
@@ -337,6 +442,52 @@ describe("schema catalogue reader (real PostgreSQL)", () => {
       type: { schema: "v0201_app", name: "postal_code", kind: "domain" },
       baseType: { schema: "pg_catalog", name: "text", kind: "base" },
     })
+  })
+
+  it("renders deterministically even when caller search_path makes a user domain visible", async () => {
+    const baseline = await readCatalogue()
+    const baselinePostal = findColumn(
+      findTable(findSchema(baseline, APP_SCHEMA), "articles"),
+      "postal",
+    )
+
+    const client = new pg.Client({ connectionString: adminDatabaseUrl })
+    await client.connect()
+    try {
+      await client.query(`SET search_path TO ${quoteIdent(APP_SCHEMA)}, public`)
+
+      // The caller session genuinely sees the domain unqualified.
+      const visible = await client.query(`
+        SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) AS rendered
+        FROM pg_catalog.pg_attribute a
+        JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = ${quoteLiteral(APP_SCHEMA)}
+          AND c.relname = 'articles'
+          AND a.attname = 'postal'
+      `)
+      expect(visible.rows[0]?.rendered).toBe("postal_code")
+
+      const reader = createSchemaCatalogueReader({
+        query: ((text: string, values?: unknown[]) =>
+          client.query(text, values)) as SchemaCatalogueDependencies["query"],
+      })
+      const catalogue = await reader.read()
+      const postal = findColumn(
+        findTable(findSchema(catalogue, APP_SCHEMA), "articles"),
+        "postal",
+      )
+
+      expect(postal.renderedType).toBe(baselinePostal.renderedType)
+      expect(postal.renderedType).toBe("v0201_app.postal_code")
+      expect(postal.defaultExpression).toBe(baselinePostal.defaultExpression)
+
+      // The pin is transaction-local: the caller session is untouched.
+      const after = await client.query("SHOW search_path")
+      expect(after.rows[0]?.search_path).toBe(`${APP_SCHEMA}, public`)
+    } finally {
+      await client.end()
+    }
   })
 
   it("returns quoted hostile identifiers exactly as data", async () => {
@@ -368,7 +519,13 @@ describe("schema catalogue reader (real PostgreSQL)", () => {
     expect(names).not.toContain("articles_view")
     expect(names).not.toContain("articles_mv")
     expect(names).not.toContain("articles_seq")
-    expect(names.sort()).toEqual(["articles", "events", "metrics"])
+    expect(names.sort()).toEqual([
+      "articles",
+      "events",
+      "events_2026",
+      "metrics",
+      "no_columns",
+    ])
   })
 
   it("returns deterministic ordering across repeated reads", async () => {

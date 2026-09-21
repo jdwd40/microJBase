@@ -1,4 +1,5 @@
-// Frozen shared contracts for microJBase v0.1 (see CONTRACTS.md).
+// Frozen shared contracts for microJBase (v0.1 plus the v0.2 schema
+// catalogue; see CONTRACTS.md).
 // Architect-owned: proposed changes require the CONTRACTS.md change process.
 
 export * from "./auth.js"

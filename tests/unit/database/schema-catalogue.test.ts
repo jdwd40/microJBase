@@ -3,51 +3,70 @@ import type pg from "pg"
 
 import { AppError } from "../../../src/core/index.js"
 import {
-  SCHEMA_CATALOGUE_COLUMNS_SQL,
-  SCHEMA_CATALOGUE_SCHEMAS_SQL,
-  SCHEMA_CATALOGUE_TABLES_SQL,
+  SCHEMA_CATALOGUE_SQL,
   createSchemaCatalogueReader,
   mapSchemaCatalogue,
   readSchemaCatalogue,
-  type SchemaCatalogueColumnRow,
   type SchemaCatalogueDependencies,
-  type SchemaCatalogueSchemaRow,
-  type SchemaCatalogueTableRow,
+  type SchemaCatalogueRow,
 } from "../../../src/database/schema-catalogue.js"
 
 function pgResult(rows: unknown[]): pg.QueryResult {
   return { rows, command: "SELECT", rowCount: rows.length, oid: 0, fields: [] }
 }
 
-function createMockQuery(data: {
-  schemas?: unknown[]
-  tables?: unknown[]
-  columns?: unknown[]
-}): SchemaCatalogueDependencies["query"] {
+function createMockQuery(
+  rows: unknown[],
+): SchemaCatalogueDependencies["query"] {
   return (async (text: string) => {
-    if (text === SCHEMA_CATALOGUE_SCHEMAS_SQL) {
-      return pgResult(data.schemas ?? [])
+    if (text !== SCHEMA_CATALOGUE_SQL) {
+      throw new Error(`Unexpected SQL: ${text}`)
     }
-    if (text === SCHEMA_CATALOGUE_TABLES_SQL) {
-      return pgResult(data.tables ?? [])
-    }
-    if (text === SCHEMA_CATALOGUE_COLUMNS_SQL) {
-      return pgResult(data.columns ?? [])
-    }
-    throw new Error(`Unexpected SQL: ${text}`)
+    return pgResult(rows)
   }) as SchemaCatalogueDependencies["query"]
+}
+
+function baseRow(): SchemaCatalogueRow {
+  return {
+    row_kind: "schema",
+    schema_name: "app",
+    table_name: null,
+    ordinal: null,
+    name: null,
+    owner: null,
+    kind: null,
+    has_row_security: null,
+    has_forced_row_security: null,
+    is_nullable: null,
+    default_expression: null,
+    generated: null,
+    identity: null,
+    rendered_type: null,
+    type_schema: null,
+    type_name: null,
+    type_kind: null,
+    base_type_schema: null,
+    base_type_name: null,
+    base_type_kind: null,
+  }
 }
 
 function schemaRow(
   overrides: Record<string, unknown> = {},
-): SchemaCatalogueSchemaRow {
-  return { schema_name: "app", owner: "owner_role", ...overrides }
+): SchemaCatalogueRow {
+  return {
+    ...baseRow(),
+    row_kind: "schema",
+    schema_name: "app",
+    owner: "owner_role",
+    ...overrides,
+  }
 }
 
-function tableRow(
-  overrides: Record<string, unknown> = {},
-): SchemaCatalogueTableRow {
+function tableRow(overrides: Record<string, unknown> = {}): SchemaCatalogueRow {
   return {
+    ...baseRow(),
+    row_kind: "table",
     schema_name: "app",
     table_name: "items",
     owner: "owner_role",
@@ -60,8 +79,10 @@ function tableRow(
 
 function columnRow(
   overrides: Record<string, unknown> = {},
-): SchemaCatalogueColumnRow {
+): SchemaCatalogueRow {
   return {
+    ...baseRow(),
+    row_kind: "column",
     schema_name: "app",
     table_name: "items",
     ordinal: 1,
@@ -74,9 +95,6 @@ function columnRow(
     type_schema: "pg_catalog",
     type_name: "uuid",
     type_kind: "b",
-    base_type_schema: null,
-    base_type_name: null,
-    base_type_kind: null,
     ...overrides,
   }
 }
@@ -85,7 +103,7 @@ const FORBIDDEN_TOKENS =
   /\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|MERGE|CALL)\b/i
 
 describe("schema catalogue query shape", () => {
-  it("executes only fixed read-only SELECT statements with no parameters", async () => {
+  it("executes exactly one fixed read-only SELECT statement with no parameters", async () => {
     const calls: { text: string; values: unknown }[] = []
     const query = (async (text: string, values?: unknown[]) => {
       calls.push({ text, values })
@@ -94,30 +112,40 @@ describe("schema catalogue query shape", () => {
 
     await readSchemaCatalogue(query)
 
-    expect(calls.map((call) => call.text)).toEqual([
-      SCHEMA_CATALOGUE_SCHEMAS_SQL,
-      SCHEMA_CATALOGUE_TABLES_SQL,
-      SCHEMA_CATALOGUE_COLUMNS_SQL,
-    ])
-    for (const call of calls) {
-      expect(call.values).toBeUndefined()
-      expect(call.text.trimStart().toUpperCase().startsWith("SELECT")).toBe(
-        true,
-      )
-      expect(call.text).not.toContain("${")
-      expect(call.text).not.toContain(";")
-      expect(call.text).not.toMatch(FORBIDDEN_TOKENS)
-    }
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.text).toBe(SCHEMA_CATALOGUE_SQL)
+    expect(calls[0]?.values).toBeUndefined()
+    expect(calls[0]?.text.trimStart().toUpperCase().startsWith("SELECT")).toBe(
+      true,
+    )
+    expect(calls[0]?.text).not.toContain("${")
+    expect(calls[0]?.text).not.toContain(";")
+    expect(calls[0]?.text).not.toMatch(FORBIDDEN_TOKENS)
   })
 
-  it("reader port reads through the injected query only", async () => {
-    const query = vi.fn(createMockQuery({ schemas: [schemaRow()] }))
+  it("pins transaction-local search_path to pg_catalog inside the statement", () => {
+    expect(SCHEMA_CATALOGUE_SQL).toContain(
+      "pg_catalog.set_config('search_path', 'pg_catalog', true)",
+    )
+    expect(SCHEMA_CATALOGUE_SQL).toContain("pg_catalog.format_type(")
+    expect(SCHEMA_CATALOGUE_SQL).toContain("pg_catalog.pg_get_expr(")
+    expect(SCHEMA_CATALOGUE_SQL).toContain("pg_catalog.pg_get_userbyid(")
+  })
+
+  it("returns schema, table, and column row sets together", () => {
+    expect(SCHEMA_CATALOGUE_SQL).toContain("'schema' AS row_kind")
+    expect(SCHEMA_CATALOGUE_SQL).toContain("UNION ALL")
+    expect(SCHEMA_CATALOGUE_SQL.match(/UNION ALL/g)).toHaveLength(2)
+  })
+
+  it("reader port issues exactly one query per read", async () => {
+    const query = vi.fn(createMockQuery([schemaRow()]))
     const typedQuery = query as unknown as SchemaCatalogueDependencies["query"]
     const reader = createSchemaCatalogueReader({ query: typedQuery })
 
     const catalogue = await reader.read()
 
-    expect(query).toHaveBeenCalledTimes(3)
+    expect(query).toHaveBeenCalledTimes(1)
     expect(catalogue.schemas.map((schema) => schema.name)).toEqual(["app"])
   })
 })
@@ -132,6 +160,26 @@ describe("schema catalogue row mapping", () => {
       owner: "owner_role",
       tables: [],
     })
+  })
+
+  it("maps a zero-column table with an empty column list", () => {
+    const catalogue = mapSchemaCatalogue(
+      [schemaRow()],
+      [tableRow({ table_name: "empty_table" })],
+      [],
+    )
+
+    expect(catalogue.schemas[0]?.tables).toEqual([
+      {
+        schema: "app",
+        name: "empty_table",
+        owner: "owner_role",
+        kind: "regular",
+        hasRowSecurity: false,
+        hasForcedRowSecurity: false,
+        columns: [],
+      },
+    ])
   })
 
   it("maps a regular table with nullable, defaulted, identity, and generated columns", () => {
@@ -165,6 +213,15 @@ describe("schema catalogue row mapping", () => {
           is_nullable: true,
           default_expression: "length(title)",
           generated: "s",
+          rendered_type: "integer",
+          type_name: "int4",
+        }),
+        columnRow({
+          ordinal: 5,
+          name: "computed_virtual",
+          is_nullable: true,
+          default_expression: "length(title)",
+          generated: "v",
           rendered_type: "integer",
           type_name: "int4",
         }),
@@ -225,6 +282,17 @@ describe("schema catalogue row mapping", () => {
         type: { schema: "pg_catalog", name: "int4", kind: "base" },
         baseType: null,
       },
+      {
+        ordinal: 5,
+        name: "computed_virtual",
+        isNullable: true,
+        defaultExpression: null,
+        generated: "virtual",
+        identity: "none",
+        renderedType: "integer",
+        type: { schema: "pg_catalog", name: "int4", kind: "base" },
+        baseType: null,
+      },
     ])
   })
 
@@ -267,7 +335,7 @@ describe("schema catalogue row mapping", () => {
     expect(table?.columns[1]?.identity).toBe("by_default")
   })
 
-  it("preserves declared domain identity alongside the underlying base type", () => {
+  it("preserves declared domain identity alongside the immediate base type", () => {
     const catalogue = mapSchemaCatalogue(
       [schemaRow()],
       [tableRow()],
@@ -313,6 +381,39 @@ describe("schema catalogue row mapping", () => {
     expect(columns?.[1]?.baseType).toBeNull()
   })
 
+  it("reports an immediate base type that is itself a domain without recursing", () => {
+    const catalogue = mapSchemaCatalogue(
+      [schemaRow()],
+      [tableRow()],
+      [
+        columnRow({
+          ordinal: 1,
+          name: "nested",
+          is_nullable: true,
+          rendered_type: "app.child_domain",
+          type_schema: "app",
+          type_name: "child_domain",
+          type_kind: "d",
+          base_type_schema: "app",
+          base_type_name: "parent_domain",
+          base_type_kind: "d",
+        }),
+      ],
+    )
+
+    const column = catalogue.schemas[0]?.tables[0]?.columns[0]
+    expect(column?.type).toEqual({
+      schema: "app",
+      name: "child_domain",
+      kind: "domain",
+    })
+    expect(column?.baseType).toEqual({
+      schema: "app",
+      name: "parent_domain",
+      kind: "domain",
+    })
+  })
+
   it("groups and orders deterministically regardless of input row order", () => {
     const schemas = [
       schemaRow({ schema_name: "zeta" }),
@@ -356,7 +457,9 @@ describe("schema catalogue row mapping", () => {
       shuffled.schemas[0]?.tables[0]?.columns.map((column) => column.name),
     ).toEqual(["x", "y"])
   })
+})
 
+describe("schema catalogue strict validation", () => {
   it("fails explicitly on malformed or impossible rows", () => {
     expect(() =>
       mapSchemaCatalogue([{ schema_name: 42 } as never], [], []),
@@ -396,14 +499,146 @@ describe("schema catalogue row mapping", () => {
       )
     }
   })
+
+  it("fails when a row carries a field owned by another row kind", () => {
+    expect(() =>
+      mapSchemaCatalogue([schemaRow({ table_name: "items" })], [], []),
+    ).toThrowError(expect.objectContaining({ code: "INTERNAL_ERROR" }))
+
+    expect(() =>
+      mapSchemaCatalogue([schemaRow()], [tableRow({ is_nullable: true })], []),
+    ).toThrowError(expect.objectContaining({ code: "INTERNAL_ERROR" }))
+
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [columnRow({ has_row_security: false })],
+      ),
+    ).toThrowError(expect.objectContaining({ code: "INTERNAL_ERROR" }))
+  })
+
+  it("fails on duplicate schema names, table keys, and column ordinals/names", () => {
+    expect(() =>
+      mapSchemaCatalogue([schemaRow(), schemaRow()], [], []),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "INTERNAL_ERROR",
+        message: expect.stringContaining('duplicate schema "app"'),
+      }),
+    )
+
+    expect(() =>
+      mapSchemaCatalogue([schemaRow()], [tableRow(), tableRow()], []),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "INTERNAL_ERROR",
+        message: expect.stringContaining('duplicate table "app.items"'),
+      }),
+    )
+
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [
+          columnRow({ ordinal: 1, name: "a" }),
+          columnRow({ ordinal: 1, name: "b" }),
+        ],
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "INTERNAL_ERROR",
+        message: expect.stringContaining("duplicate ordinal 1"),
+      }),
+    )
+
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [
+          columnRow({ ordinal: 1, name: "a" }),
+          columnRow({ ordinal: 2, name: "a" }),
+        ],
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "INTERNAL_ERROR",
+        message: expect.stringContaining('duplicate column "a"'),
+      }),
+    )
+  })
+
+  it("fails on orphan tables and columns instead of dropping them", () => {
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow({ schema_name: "missing" })],
+        [],
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "INTERNAL_ERROR",
+        message: expect.stringContaining("has no matching schema row"),
+      }),
+    )
+
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [columnRow({ table_name: "missing" })],
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "INTERNAL_ERROR",
+        message: expect.stringContaining("has no matching table row"),
+      }),
+    )
+  })
+
+  it("enforces the domain iff immediate base type invariant", () => {
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [columnRow({ type_kind: "d", base_type_name: null })],
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "INTERNAL_ERROR",
+        message: expect.stringContaining("missing its immediate base type"),
+      }),
+    )
+
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [
+          columnRow({
+            type_kind: "b",
+            base_type_schema: "pg_catalog",
+            base_type_name: "text",
+            base_type_kind: "b",
+          }),
+        ],
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "INTERNAL_ERROR",
+        message: expect.stringContaining("non-domain"),
+      }),
+    )
+  })
 })
 
 describe("schema catalogue dependency errors", () => {
   it("translates connection failures through the database error boundary", async () => {
-    const error = Object.assign(
-      new Error("connect ECONNREFUSED 127.0.0.1:5432"),
-      { code: "ECONNREFUSED" },
-    )
+    const error = Object.assign(new Error("connect ECONNREFUSED 127.1:5432"), {
+      code: "ECONNREFUSED",
+    })
     const query = (async () => {
       throw error
     }) as SchemaCatalogueDependencies["query"]

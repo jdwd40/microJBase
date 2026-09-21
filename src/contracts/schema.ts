@@ -19,8 +19,11 @@ export interface TypeIdentity {
 
 export type SchemaTableKind = "regular" | "partitioned"
 
-/** pg_attribute.attgenerated: '' (none) or 's' (stored). */
-export type ColumnGeneratedKind = "none" | "stored"
+/**
+ * pg_attribute.attgenerated mapped to a stable literal:
+ * '' (none), 's' (stored), or 'v' (virtual; PostgreSQL 18+).
+ */
+export type ColumnGeneratedKind = "none" | "stored" | "virtual"
 
 /** pg_attribute.attidentity: '' (none), 'a' (always), 'd' (by default). */
 export type ColumnIdentityKind = "none" | "always" | "by_default"
@@ -46,8 +49,10 @@ export interface SchemaCatalogueColumn {
   /** Declared type identity; a declared domain stays a domain here. */
   readonly type: TypeIdentity
   /**
-   * Underlying base type identity when the declared type is a domain;
-   * null when the declared type is not a domain.
+   * Immediate base type of the declared type: pg_type.typbasetype of the
+   * declared type when (and only when) the declared type is a domain. The
+   * immediate base may itself be a domain; this reader does not recurse.
+   * Null when the declared type is not a domain.
    */
   readonly baseType: TypeIdentity | null
 }
