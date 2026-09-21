@@ -104,6 +104,8 @@ Requires bearer authentication. Returns `200`:
 
 `:table` is an exposed alias, not a SQL table name. Unknown and unexposed aliases return `404 TABLE_NOT_FOUND`.
 
+On user-owned tables, a client-supplied ownership value (`user_id`) naming a different user is rejected with the generic `409 CONFLICT` before any write; when omitted, ownership stays bound to the authenticated identity. PostgreSQL row-level security remains the final enforcement boundary.
+
 ### `GET /v1/data/:table`
 
 Query:

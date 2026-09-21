@@ -332,6 +332,9 @@ const PG_EXCLUSION_VIOLATION = "23P01"
 const PG_INVALID_TEXT_REPRESENTATION = "22P02"
 const PG_NUMERIC_VALUE_OUT_OF_RANGE = "22003"
 const PG_INVALID_DATETIME_FORMAT = "22007"
+// RLS WITH CHECK / USING violations surface as insufficient privilege. The
+// public mapping must stay generic: no policy names, SQL, or PostgreSQL text.
+const PG_INSUFFICIENT_PRIVILEGE = "42501"
 
 function isPostgresError(error: unknown): error is Record<string, unknown> {
   return typeof error === "object" && error !== null
@@ -368,6 +371,10 @@ export function translateDataError(error: unknown): AppError {
     case PG_INVALID_TEXT_REPRESENTATION:
     case PG_NUMERIC_VALUE_OUT_OF_RANGE:
     case PG_INVALID_DATETIME_FORMAT:
+      return new AppError("CONFLICT", "A conflict occurred", 409)
+    case PG_INSUFFICIENT_PRIVILEGE:
+      // RLS rejected the write (e.g. a foreign ownership claim). Same safe
+      // public shape as every other conflict: nothing about policies or SQL.
       return new AppError("CONFLICT", "A conflict occurred", 409)
     default:
       return translatePoolError(error)

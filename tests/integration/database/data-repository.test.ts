@@ -347,6 +347,14 @@ describe("data repository", () => {
       })
       const realTranslated = translateDataError(realUnique)
       expect(realTranslated.code).toBe("CONFLICT")
+
+      // RLS rejections (42501) classify by SQLSTATE too, regardless of wording.
+      const rlsLike = Object.assign(
+        new Error("row-level security policy violated"),
+        { code: "42501" },
+      )
+      expect(translateDataError(rlsLike).code).toBe("CONFLICT")
+      expect(translateDataError(rlsLike).status).toBe(409)
     })
   })
 
@@ -479,6 +487,73 @@ describe("data repository", () => {
         id: missingId,
       })
       expect(hiddenDelete).toEqual(missingDelete)
+    })
+
+    it("maps an RLS 42501 rejection to the safe generic 409 CONFLICT", async () => {
+      const t = await table()
+      await expect(
+        repository.create({
+          identity: { userId: ALICE },
+          table: t,
+          values: { title: "forged ownership", user_id: BOB },
+        }),
+      ).rejects.toMatchObject({
+        code: "CONFLICT",
+        status: 409,
+        message: "A conflict occurred",
+      })
+
+      // The rejected write must not have created any row, foreign or owned.
+      const count = await withAdminClient(async (admin) => {
+        const rs = await admin.query<{ count: string }>(
+          "SELECT COUNT(*)::text AS count FROM public.todos",
+        )
+        return rs.rows[0]?.count
+      })
+      expect(count).toBe("0")
+    })
+
+    it("exposes no RLS or policy internals in the public error", async () => {
+      const t = await table()
+      try {
+        await repository.create({
+          identity: { userId: ALICE },
+          table: t,
+          values: { title: "forged ownership", user_id: BOB },
+        })
+        expect.unreachable("should throw")
+      } catch (error: unknown) {
+        const serialized = JSON.stringify(error)
+        expect(serialized).not.toMatch(/42501/i)
+        expect(serialized).not.toMatch(/policy|row-level|rls|with check/i)
+        expect(serialized).not.toMatch(/todos/i)
+      }
+    })
+
+    it("maps an RLS 42501 ownership transfer to 409 and keeps the owner", async () => {
+      const id = await insertTodo(ALICE, "stay mine")
+      const t = await table()
+      await expect(
+        repository.updateById({
+          identity: { userId: ALICE },
+          table: t,
+          id,
+          values: { user_id: BOB },
+        }),
+      ).rejects.toMatchObject({
+        code: "CONFLICT",
+        status: 409,
+        message: "A conflict occurred",
+      })
+
+      const owner = await withAdminClient(async (admin) => {
+        const rs = await admin.query<{ user_id: string }>(
+          "SELECT user_id FROM public.todos WHERE id = $1",
+          [id],
+        )
+        return rs.rows[0]?.user_id
+      })
+      expect(owner).toBe(ALICE)
     })
   })
 
