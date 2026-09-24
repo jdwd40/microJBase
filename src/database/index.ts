@@ -1,5 +1,5 @@
 // Public database entry point for microJBase (v0.1 plus the v0.2 schema
-// catalogue reader).
+// catalogue reader and schema snapshot reader).
 //
 // Exports the pool and transaction helpers. Repository adapters and the
 // migration runner live in sibling files and are imported by their callers.
@@ -48,6 +48,19 @@ export {
   readSchemaCatalogue,
   type SchemaCatalogueDependencies,
 } from "./schema-catalogue.js"
+export {
+  MIGRATION_HISTORY_SQL,
+  classifySchemaObject,
+  createSchemaSnapshot,
+  createSchemaSnapshotReader,
+  mapMigrationHistory,
+  readMigrationHistory,
+  readSchemaSnapshot,
+  type MigrationHistoryRow,
+  type SchemaSnapshotDependencies,
+  type SchemaSnapshotExposedTable,
+  type SchemaSnapshotInput,
+} from "./schema-snapshot.js"
 export {
   type ColumnMetadata,
   type VerifiedTableMetadata,

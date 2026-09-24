@@ -37,7 +37,7 @@ src/
 ├── contracts/              # frozen ports and shared public types
 │   ├── auth.ts
 │   ├── data.ts
-│   ├── schema.ts            # v0.2 schema-catalogue contract (V02-01)
+│   ├── schema.ts            # v0.2 schema-catalogue/snapshot contracts (V02-01..V02-03)
 │   └── index.ts
 ├── auth/                   # auth domain logic; no pg/Fastify imports
 │   ├── service.ts
@@ -50,7 +50,8 @@ src/
 │   ├── table-registry.ts
 │   ├── auth-repository.ts
 │   ├── data-repository.ts
-│   └── schema-catalogue.ts  # v0.2 read-only catalogue reader (V02-01)
+│   ├── schema-catalogue.ts  # v0.2 read-only catalogue reader (V02-01..V02-03)
+│   └── schema-snapshot.ts   # v0.2 read-only snapshot assembly (V02-03)
 ├── http/
 │   ├── server.ts
 │   ├── auth-routes.ts

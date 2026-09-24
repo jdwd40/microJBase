@@ -48,6 +48,17 @@ function baseRow(): SchemaCatalogueRow {
     base_type_schema: null,
     base_type_name: null,
     base_type_kind: null,
+    constraint_type: null,
+    constraint_columns: null,
+    ref_schema: null,
+    ref_table: null,
+    ref_columns: null,
+    on_update: null,
+    on_delete: null,
+    is_unique: null,
+    is_expression: null,
+    has_predicate: null,
+    index_columns: null,
   }
 }
 
@@ -99,6 +110,52 @@ function columnRow(
   }
 }
 
+function constraintRow(
+  overrides: Record<string, unknown> = {},
+): SchemaCatalogueRow {
+  return {
+    ...baseRow(),
+    row_kind: "constraint",
+    schema_name: "app",
+    table_name: "items",
+    name: "items_pkey",
+    constraint_type: "p",
+    constraint_columns: ["id"],
+    ...overrides,
+  }
+}
+
+function foreignKeyRow(
+  overrides: Record<string, unknown> = {},
+): SchemaCatalogueRow {
+  return constraintRow({
+    name: "items_owner_id_fkey",
+    constraint_type: "f",
+    constraint_columns: ["owner_id"],
+    ref_schema: "app",
+    ref_table: "owners",
+    ref_columns: ["id"],
+    on_update: "a",
+    on_delete: "c",
+    ...overrides,
+  })
+}
+
+function indexRow(overrides: Record<string, unknown> = {}): SchemaCatalogueRow {
+  return {
+    ...baseRow(),
+    row_kind: "index",
+    schema_name: "app",
+    table_name: "items",
+    name: "items_title_idx",
+    is_unique: false,
+    is_expression: false,
+    has_predicate: false,
+    index_columns: ["title"],
+    ...overrides,
+  }
+}
+
 const FORBIDDEN_TOKENS =
   /\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|MERGE|CALL)\b/i
 
@@ -139,13 +196,34 @@ describe("schema catalogue query shape", () => {
     // the pin on any planner path.
     expect(SCHEMA_CATALOGUE_SQL).toContain("search_path_pin AS MATERIALIZED")
     expect(SCHEMA_CATALOGUE_SQL).toContain("CROSS JOIN LATERAL")
-    expect(SCHEMA_CATALOGUE_SQL.match(/pin\.pinned_path/g)).toHaveLength(3)
+    // One outer-reference carrier per UNION branch: schema, table, column,
+    // constraint, and index.
+    expect(SCHEMA_CATALOGUE_SQL.match(/pin\.pinned_path/g)).toHaveLength(5)
   })
 
-  it("returns schema, table, and column row sets together", () => {
+  it("returns schema, table, column, constraint, and index row sets together", () => {
     expect(SCHEMA_CATALOGUE_SQL).toContain("'schema' AS row_kind")
+    expect(SCHEMA_CATALOGUE_SQL).toContain("'constraint'")
+    expect(SCHEMA_CATALOGUE_SQL).toContain("'index'")
     expect(SCHEMA_CATALOGUE_SQL).toContain("UNION ALL")
-    expect(SCHEMA_CATALOGUE_SQL.match(/UNION ALL/g)).toHaveLength(2)
+    expect(SCHEMA_CATALOGUE_SQL.match(/UNION ALL/g)).toHaveLength(4)
+    // Constraint rows come from pg_constraint; index rows from pg_index with
+    // constraint-backed indexes (pk/unique/exclusion) excluded so a backing
+    // index is never double-reported alongside its constraint.
+    expect(SCHEMA_CATALOGUE_SQL).toContain("pg_catalog.pg_constraint con")
+    expect(SCHEMA_CATALOGUE_SQL).toContain("pg_catalog.pg_index i")
+    expect(SCHEMA_CATALOGUE_SQL).toContain("con.conindid = i.indexrelid")
+    expect(SCHEMA_CATALOGUE_SQL).toContain("AND con.oid IS NULL")
+    // Deterministic ordering: name breaks ties between rows of one kind on
+    // the same table (constraint and index rows have no ordinal).
+    expect(SCHEMA_CATALOGUE_SQL).toContain(
+      "ORDER BY r.row_kind, r.schema_name, r.table_name, r.ordinal, r.name",
+    )
+    // NOT NULL constraint entries (PostgreSQL 18 contype 'n') are excluded;
+    // nullability is reported per column instead.
+    expect(SCHEMA_CATALOGUE_SQL).toContain(
+      "con.contype IN ('p', 'u', 'f', 'c', 'x')",
+    )
   })
 
   it("reader port issues exactly one query per read", async () => {
@@ -188,6 +266,8 @@ describe("schema catalogue row mapping", () => {
         hasRowSecurity: false,
         hasForcedRowSecurity: false,
         columns: [],
+        constraints: [],
+        indexes: [],
       },
     ])
   })
@@ -469,6 +549,221 @@ describe("schema catalogue row mapping", () => {
   })
 })
 
+describe("schema catalogue constraint and index mapping", () => {
+  it("maps primary-key, unique, and check constraints with ordered columns", () => {
+    const catalogue = mapSchemaCatalogue(
+      [schemaRow()],
+      [tableRow()],
+      [columnRow()],
+      [
+        constraintRow({ name: "items_pkey", constraint_type: "p" }),
+        constraintRow({
+          name: "items_title_key",
+          constraint_type: "u",
+          constraint_columns: ["title"],
+        }),
+        constraintRow({
+          name: "items_title_check",
+          constraint_type: "c",
+          constraint_columns: null,
+        }),
+      ],
+      [],
+    )
+
+    // Constraints are sorted by name regardless of input order.
+    expect(catalogue.schemas[0]?.tables[0]?.constraints).toEqual([
+      {
+        name: "items_pkey",
+        classification: "primary_key",
+        columns: ["id"],
+        references: null,
+        onUpdate: null,
+        onDelete: null,
+      },
+      {
+        name: "items_title_check",
+        classification: "check",
+        columns: [],
+        references: null,
+        onUpdate: null,
+        onDelete: null,
+      },
+      {
+        name: "items_title_key",
+        classification: "unique",
+        columns: ["title"],
+        references: null,
+        onUpdate: null,
+        onDelete: null,
+      },
+    ])
+  })
+
+  it("maps foreign keys with referenced target and update/delete actions", () => {
+    const catalogue = mapSchemaCatalogue(
+      [schemaRow()],
+      [tableRow()],
+      [columnRow()],
+      [
+        foreignKeyRow(),
+        foreignKeyRow({
+          name: "items_alt_fkey",
+          constraint_columns: ["alt_id"],
+          ref_schema: "other",
+          ref_table: "things",
+          ref_columns: ["thing_id"],
+          on_update: "r",
+          on_delete: "n",
+        }),
+        foreignKeyRow({
+          name: "items_legacy_fkey",
+          constraint_columns: ["legacy_id"],
+          on_update: "d",
+          on_delete: "a",
+        }),
+      ],
+      [],
+    )
+
+    const constraints = catalogue.schemas[0]?.tables[0]?.constraints
+    expect(constraints).toEqual([
+      {
+        name: "items_alt_fkey",
+        classification: "foreign_key",
+        columns: ["alt_id"],
+        references: {
+          schema: "other",
+          table: "things",
+          columns: ["thing_id"],
+        },
+        onUpdate: "restrict",
+        onDelete: "set_null",
+      },
+      {
+        name: "items_legacy_fkey",
+        classification: "foreign_key",
+        columns: ["legacy_id"],
+        references: {
+          schema: "app",
+          table: "owners",
+          columns: ["id"],
+        },
+        // set_default is reported as observed data even though the v0.2
+        // management allowlist excludes it.
+        onUpdate: "set_default",
+        onDelete: "no_action",
+      },
+      {
+        name: "items_owner_id_fkey",
+        classification: "foreign_key",
+        columns: ["owner_id"],
+        references: { schema: "app", table: "owners", columns: ["id"] },
+        onUpdate: "no_action",
+        onDelete: "cascade",
+      },
+    ])
+  })
+
+  it("maps composite ordered constraint columns", () => {
+    const catalogue = mapSchemaCatalogue(
+      [schemaRow()],
+      [tableRow()],
+      [columnRow()],
+      [
+        constraintRow({
+          name: "items_pair_key",
+          constraint_type: "u",
+          constraint_columns: ["zeta", "alpha"],
+        }),
+      ],
+      [],
+    )
+
+    const constraint = catalogue.schemas[0]?.tables[0]?.constraints[0]
+    expect(constraint?.classification).toBe("unique")
+    // pg_constraint.conkey order is preserved verbatim.
+    expect(constraint?.columns).toEqual(["zeta", "alpha"])
+  })
+
+  it("maps ordinary, unique, partial, and expression indexes", () => {
+    const catalogue = mapSchemaCatalogue(
+      [schemaRow()],
+      [tableRow()],
+      [columnRow()],
+      [],
+      [
+        indexRow({ name: "zulu_idx" }),
+        indexRow({
+          name: "alpha_unique_idx",
+          is_unique: true,
+          index_columns: ["title", "id"],
+        }),
+        indexRow({
+          name: "partial_idx",
+          has_predicate: true,
+          index_columns: ["owner_id"],
+        }),
+        indexRow({
+          name: "expression_idx",
+          is_expression: true,
+          index_columns: [null],
+        }),
+        indexRow({
+          name: "partial_expression_idx",
+          is_expression: true,
+          has_predicate: true,
+          index_columns: [null],
+        }),
+      ],
+    )
+
+    // Sorted by name; classification precedence: expression over partial.
+    expect(catalogue.schemas[0]?.tables[0]?.indexes).toEqual([
+      {
+        name: "alpha_unique_idx",
+        classification: "index",
+        isUnique: true,
+        isExpression: false,
+        hasPredicate: false,
+        columns: ["title", "id"],
+      },
+      {
+        name: "expression_idx",
+        classification: "expression_index",
+        isUnique: false,
+        isExpression: true,
+        hasPredicate: false,
+        columns: [null],
+      },
+      {
+        name: "partial_expression_idx",
+        classification: "expression_index",
+        isUnique: false,
+        isExpression: true,
+        hasPredicate: true,
+        columns: [null],
+      },
+      {
+        name: "partial_idx",
+        classification: "partial_index",
+        isUnique: false,
+        isExpression: false,
+        hasPredicate: true,
+        columns: ["owner_id"],
+      },
+      {
+        name: "zulu_idx",
+        classification: "index",
+        isUnique: false,
+        isExpression: false,
+        hasPredicate: false,
+        columns: ["title"],
+      },
+    ])
+  })
+})
+
 describe("schema catalogue strict validation", () => {
   it("fails explicitly on malformed or impossible rows", () => {
     expect(() =>
@@ -639,6 +934,189 @@ describe("schema catalogue strict validation", () => {
       expect.objectContaining({
         code: "INTERNAL_ERROR",
         message: expect.stringContaining("non-domain"),
+      }),
+    )
+  })
+
+  it("fails on malformed constraint rows of every classification", () => {
+    const badConstraintRows: Record<string, unknown>[] = [
+      { constraint_type: "n" },
+      { constraint_type: "z" },
+      { constraint_columns: [] },
+      { constraint_columns: ["id", 7] },
+      { constraint_columns: null },
+      { on_update: "x" },
+      { on_delete: "x" },
+      { ref_schema: null },
+      { ref_columns: [] },
+      { ref_schema: "app", on_update: null },
+    ]
+    for (const overrides of badConstraintRows) {
+      expect(() =>
+        mapSchemaCatalogue(
+          [schemaRow()],
+          [tableRow()],
+          [columnRow()],
+          [foreignKeyRow(overrides)],
+        ),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "INTERNAL_ERROR",
+          message: expect.stringContaining("Malformed schema catalogue row"),
+        }),
+      )
+    }
+
+    // Non-foreign-key constraints must never carry a referenced target or
+    // actions.
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [columnRow()],
+        [constraintRow({ ref_schema: "app" })],
+      ),
+    ).toThrowError(expect.objectContaining({ code: "INTERNAL_ERROR" }))
+
+    // A check constraint must never carry a column list (the SQL statement
+    // normalizes pg_constraint.conkey to NULL for checks because PostgreSQL
+    // 18 populates it while PostgreSQL 16 leaves it NULL).
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [columnRow()],
+        [constraintRow({ constraint_type: "c", constraint_columns: ["id"] })],
+      ),
+    ).toThrowError(expect.objectContaining({ code: "INTERNAL_ERROR" }))
+  })
+
+  it("fails on malformed index rows", () => {
+    const badIndexRows: Record<string, unknown>[] = [
+      { is_unique: null },
+      { is_expression: "yes" },
+      { has_predicate: 1 },
+      { index_columns: null },
+      { index_columns: [] },
+      { index_columns: ["id", ""] },
+      { index_columns: [7] },
+      // A null column position is only meaningful for an expression index.
+      { index_columns: [null] },
+    ]
+    for (const overrides of badIndexRows) {
+      expect(() =>
+        mapSchemaCatalogue(
+          [schemaRow()],
+          [tableRow()],
+          [columnRow()],
+          [],
+          [indexRow(overrides)],
+        ),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "INTERNAL_ERROR",
+          message: expect.stringContaining("Malformed schema catalogue row"),
+        }),
+      )
+    }
+  })
+
+  it("fails when constraint or index rows carry another kind's fields", () => {
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [columnRow()],
+        [foreignKeyRow({ is_nullable: true })],
+      ),
+    ).toThrowError(expect.objectContaining({ code: "INTERNAL_ERROR" }))
+
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [columnRow()],
+        [foreignKeyRow({ ordinal: 1 })],
+      ),
+    ).toThrowError(expect.objectContaining({ code: "INTERNAL_ERROR" }))
+
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [columnRow()],
+        [],
+        [indexRow({ constraint_type: "u" })],
+      ),
+    ).toThrowError(expect.objectContaining({ code: "INTERNAL_ERROR" }))
+
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [columnRow()],
+        [],
+        [indexRow({ has_row_security: false })],
+      ),
+    ).toThrowError(expect.objectContaining({ code: "INTERNAL_ERROR" }))
+  })
+
+  it("fails on duplicate constraint names, duplicate index names, and orphan rows", () => {
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [columnRow()],
+        [constraintRow(), constraintRow()],
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "INTERNAL_ERROR",
+        message: expect.stringContaining('duplicate constraint "items_pkey"'),
+      }),
+    )
+
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [columnRow()],
+        [],
+        [indexRow(), indexRow()],
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "INTERNAL_ERROR",
+        message: expect.stringContaining('duplicate index "items_title_idx"'),
+      }),
+    )
+
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [columnRow()],
+        [constraintRow({ table_name: "missing" })],
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "INTERNAL_ERROR",
+        message: expect.stringContaining("has no matching table row"),
+      }),
+    )
+
+    expect(() =>
+      mapSchemaCatalogue(
+        [schemaRow()],
+        [tableRow()],
+        [columnRow()],
+        [],
+        [indexRow({ table_name: "missing" })],
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "INTERNAL_ERROR",
+        message: expect.stringContaining("has no matching table row"),
       }),
     )
   })

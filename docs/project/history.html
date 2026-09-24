@@ -79,13 +79,28 @@
           </li>
           <li>
             <strong>
-              <time datetime="2026-09-21T20:39:47Z">2026-09-21 20:39 UTC</time>
-              — V02-01 approved for merge.</strong
+              <time datetime="2026-09-21T20:55:01Z">2026-09-21 20:55 UTC</time>
+              — V02-01 merged.</strong
             >
-            PR #26 adds the read-only schema catalogue contracts and reader.
-            Grok 4.6 returned final SHIP after Kimi fixed two MAJOR, five MINOR,
-            and one residual planner-order finding. CI passed 36 files / 386
-            tests. Progress remains 1 of 20 merged until PR #26 merges.
+            PR #26 merged the read-only schema catalogue contracts and reader at
+            <code>b10c8c8</code>. Grok 4.6 returned final SHIP after Kimi fixed
+            two MAJOR, five MINOR, and one residual planner-order finding. CI
+            passed 36 files / 386 tests. Progress: 2 of 20 merged; V02-02 is
+            next in the Wave 1 queue.
+          </li>
+          <li>
+            <strong>
+              <time datetime="2026-09-24T22:30:00Z">2026-09-24 22:30 UTC</time>
+              — V02-02 and V02-03 implemented.</strong
+            >
+            Kimi implemented constraint and index introspection (V02-02) and the
+            schema snapshot service with migration/exposure state (V02-03) on
+            <code>master</code>. The catalogue keeps its single pinned statement
+            (now five row-kind branches), snapshots add one fixed read-only
+            migration-history statement and v0.1 registry exposure state, and
+            internal objects are classified, never presented as manageable. The
+            full suite is green at 39 files / 420 tests. Independent review is
+            the next gate before merge.
           </li>
         </ol>
       </div>
@@ -94,7 +109,7 @@
       <div class="wrap">
         Static wiki: relative links only, no external assets, no JavaScript.
         Last updated
-        <time datetime="2026-09-21T20:39:47Z">2026-09-21 20:39 UTC</time>.
+        <time datetime="2026-09-24T22:30:00Z">2026-09-24 22:30 UTC</time>.
       </div>
     </footer>
   </body>

@@ -1,10 +1,12 @@
-// Read-only PostgreSQL schema-catalogue reader for microJBase v0.2 (V02-01).
+// Read-only PostgreSQL schema-catalogue reader for microJBase v0.2 (V02-01,
+// extended by V02-02 with constraint and index metadata).
 //
 // The reader executes exactly one fixed, read-only catalogue SELECT statement
-// against pg_namespace/pg_class/pg_attribute/pg_type/pg_attrdef. No caller
-// identifier or SQL fragment ever enters the query text; quoted or
-// hostile-looking schema/table/column names are returned as data only.
-// There is no mutation path: the reader issues one SELECT and maps rows.
+// against pg_namespace/pg_class/pg_attribute/pg_type/pg_attrdef,
+// pg_constraint, and pg_index. No caller identifier or SQL fragment ever
+// enters the query text; quoted or hostile-looking schema/table/column/
+// constraint/index names are returned as data only. There is no mutation
+// path: the reader issues one SELECT and maps rows.
 //
 // One statement means one snapshot: a single SELECT runs under a single
 // PostgreSQL snapshot, so concurrent DDL cannot stitch together a
@@ -29,11 +31,16 @@ import type pg from "pg"
 import type {
   ColumnGeneratedKind,
   ColumnIdentityKind,
+  ConstraintClassification,
+  ForeignKeyAction,
+  IndexClassification,
   SchemaCatalogue,
   SchemaCatalogueColumn,
   SchemaCatalogueReader,
   SchemaCatalogueSchema,
   SchemaCatalogueTable,
+  SchemaConstraint,
+  SchemaIndex,
   SchemaTableKind,
   TypeIdentity,
 } from "../contracts/index.js"
@@ -87,7 +94,18 @@ SELECT r.row_kind,
        r.type_kind,
        r.base_type_schema,
        r.base_type_name,
-       r.base_type_kind
+       r.base_type_kind,
+       r.constraint_type,
+       r.constraint_columns,
+       r.ref_schema,
+       r.ref_table,
+       r.ref_columns,
+       r.on_update,
+       r.on_delete,
+       r.is_unique,
+       r.is_expression,
+       r.has_predicate,
+       r.index_columns
 FROM search_path_pin pin
 CROSS JOIN LATERAL (
   SELECT 'schema' AS row_kind,
@@ -110,6 +128,17 @@ CROSS JOIN LATERAL (
          NULL::text AS base_type_schema,
          NULL::text AS base_type_name,
          NULL::text AS base_type_kind,
+         NULL::text AS constraint_type,
+         NULL::text[] AS constraint_columns,
+         NULL::text AS ref_schema,
+         NULL::text AS ref_table,
+         NULL::text[] AS ref_columns,
+         NULL::text AS on_update,
+         NULL::text AS on_delete,
+         NULL::boolean AS is_unique,
+         NULL::boolean AS is_expression,
+         NULL::boolean AS has_predicate,
+         NULL::text[] AS index_columns,
          pin.pinned_path
   FROM pg_catalog.pg_namespace n
   WHERE n.nspname <> 'information_schema'
@@ -135,6 +164,17 @@ CROSS JOIN LATERAL (
          NULL::text,
          NULL::text,
          NULL::text,
+         NULL::text,
+         NULL::text[],
+         NULL::text,
+         NULL::text,
+         NULL::text[],
+         NULL::text,
+         NULL::text,
+         NULL::boolean,
+         NULL::boolean,
+         NULL::boolean,
+         NULL::text[],
          pin.pinned_path
   FROM pg_catalog.pg_class c
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -162,6 +202,17 @@ CROSS JOIN LATERAL (
          bn.nspname,
          bt.typname,
          bt.typtype::text,
+         NULL::text,
+         NULL::text[],
+         NULL::text,
+         NULL::text,
+         NULL::text[],
+         NULL::text,
+         NULL::text,
+         NULL::boolean,
+         NULL::boolean,
+         NULL::boolean,
+         NULL::text[],
          pin.pinned_path
   FROM pg_catalog.pg_attribute a
   JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
@@ -176,8 +227,112 @@ CROSS JOIN LATERAL (
     AND c.relkind IN ('r', 'p')
     AND n.nspname <> 'information_schema'
     AND n.nspname NOT LIKE 'pg\\_%'
+  UNION ALL
+  SELECT 'constraint',
+         n.nspname,
+         c.relname,
+         NULL::integer,
+         con.conname,
+         NULL::text,
+         NULL::text,
+         NULL::boolean,
+         NULL::boolean,
+         NULL::boolean,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         con.contype::text,
+         CASE WHEN con.contype <> 'c' THEN
+           (SELECT array_agg(a.attname ORDER BY u.ord)
+            FROM unnest(con.conkey) WITH ORDINALITY AS u(attnum, ord)
+            JOIN pg_catalog.pg_attribute a
+              ON a.attrelid = con.conrelid AND a.attnum = u.attnum)
+         END,
+         CASE WHEN con.contype = 'f' THEN rn.nspname END,
+         CASE WHEN con.contype = 'f' THEN rc.relname END,
+         CASE WHEN con.contype = 'f' THEN
+           (SELECT array_agg(ra.attname ORDER BY u.ord)
+            FROM unnest(con.confkey) WITH ORDINALITY AS u(attnum, ord)
+            JOIN pg_catalog.pg_attribute ra
+              ON ra.attrelid = con.confrelid AND ra.attnum = u.attnum)
+         END,
+         CASE WHEN con.contype = 'f' THEN con.confupdtype::text END,
+         CASE WHEN con.contype = 'f' THEN con.confdeltype::text END,
+         NULL::boolean,
+         NULL::boolean,
+         NULL::boolean,
+         NULL::text[],
+         pin.pinned_path
+  FROM pg_catalog.pg_constraint con
+  JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  LEFT JOIN pg_catalog.pg_class rc ON rc.oid = con.confrelid
+  LEFT JOIN pg_catalog.pg_namespace rn ON rn.oid = rc.relnamespace
+  WHERE c.relkind IN ('r', 'p')
+    AND n.nspname <> 'information_schema'
+    AND n.nspname NOT LIKE 'pg\\_%'
+    -- NOT NULL constraints (contype 'n', PostgreSQL 18+) are intentionally
+    -- excluded: nullability is already reported per column via attnotnull,
+    -- and excluding them keeps output identical on PostgreSQL 16 CI.
+    AND con.contype IN ('p', 'u', 'f', 'c', 'x')
+  UNION ALL
+  SELECT 'index',
+         n.nspname,
+         t.relname,
+         NULL::integer,
+         ic.relname,
+         NULL::text,
+         NULL::text,
+         NULL::boolean,
+         NULL::boolean,
+         NULL::boolean,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text,
+         NULL::text[],
+         NULL::text,
+         NULL::text,
+         NULL::text[],
+         NULL::text,
+         NULL::text,
+         i.indisunique,
+         (i.indexprs IS NOT NULL),
+         (i.indpred IS NOT NULL),
+         (SELECT array_agg(
+                   CASE WHEN u.attnum = 0 THEN NULL ELSE a.attname END
+                   ORDER BY u.ord)
+          FROM (SELECT x.attnum::integer AS attnum, x.ord AS ord
+                FROM unnest(string_to_array(i.indkey::text, ' '))
+                     WITH ORDINALITY AS x(attnum, ord)) u
+          LEFT JOIN pg_catalog.pg_attribute a
+            ON a.attrelid = t.oid AND a.attnum = u.attnum),
+         pin.pinned_path
+  FROM pg_catalog.pg_index i
+  JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
+  JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+  JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
+  LEFT JOIN pg_catalog.pg_constraint con ON con.conindid = i.indexrelid
+  WHERE t.relkind IN ('r', 'p')
+    AND n.nspname <> 'information_schema'
+    AND n.nspname NOT LIKE 'pg\\_%'
+    AND con.oid IS NULL
 ) r
-ORDER BY r.row_kind, r.schema_name, r.table_name, r.ordinal`
+ORDER BY r.row_kind, r.schema_name, r.table_name, r.ordinal, r.name`
 
 // Raw unified catalogue row shape as returned by the fixed query. Every row
 // carries all columns; fields not meaningful for its row_kind are NULL.
@@ -203,11 +358,36 @@ export interface SchemaCatalogueRow {
   base_type_schema: unknown
   base_type_name: unknown
   base_type_kind: unknown
+  constraint_type: unknown
+  constraint_columns: unknown
+  ref_schema: unknown
+  ref_table: unknown
+  ref_columns: unknown
+  on_update: unknown
+  on_delete: unknown
+  is_unique: unknown
+  is_expression: unknown
+  has_predicate: unknown
+  index_columns: unknown
 }
 
 // Fields that must be NULL for each row kind. mapSchemaCatalogue enforces
 // these before building any model object, so a malformed or mismatched row
 // fails closed instead of leaking into the catalogue.
+const CONSTRAINT_INDEX_ROW_FIELDS = [
+  "constraint_type",
+  "constraint_columns",
+  "ref_schema",
+  "ref_table",
+  "ref_columns",
+  "on_update",
+  "on_delete",
+  "is_unique",
+  "is_expression",
+  "has_predicate",
+  "index_columns",
+] as const
+
 const SCHEMA_ROW_NULL_FIELDS = [
   "table_name",
   "ordinal",
@@ -226,6 +406,7 @@ const SCHEMA_ROW_NULL_FIELDS = [
   "base_type_schema",
   "base_type_name",
   "base_type_kind",
+  ...CONSTRAINT_INDEX_ROW_FIELDS,
 ] as const
 
 const TABLE_ROW_NULL_FIELDS = [
@@ -242,6 +423,7 @@ const TABLE_ROW_NULL_FIELDS = [
   "base_type_schema",
   "base_type_name",
   "base_type_kind",
+  ...CONSTRAINT_INDEX_ROW_FIELDS,
 ] as const
 
 const COLUMN_ROW_NULL_FIELDS = [
@@ -249,6 +431,61 @@ const COLUMN_ROW_NULL_FIELDS = [
   "kind",
   "has_row_security",
   "has_forced_row_security",
+  ...CONSTRAINT_INDEX_ROW_FIELDS,
+] as const
+
+// Constraint rows reuse the shared table locator (schema_name, table_name,
+// name) and carry constraint fields; every table-, column-, and index-owned
+// field must be NULL.
+const CONSTRAINT_ROW_NULL_FIELDS = [
+  "ordinal",
+  "owner",
+  "kind",
+  "has_row_security",
+  "has_forced_row_security",
+  "is_nullable",
+  "default_expression",
+  "generated",
+  "identity",
+  "rendered_type",
+  "type_schema",
+  "type_name",
+  "type_kind",
+  "base_type_schema",
+  "base_type_name",
+  "base_type_kind",
+  "is_unique",
+  "is_expression",
+  "has_predicate",
+  "index_columns",
+] as const
+
+// Index rows reuse the same shared locator; every table-, column-, and
+// constraint-owned field must be NULL.
+const INDEX_ROW_NULL_FIELDS = [
+  "ordinal",
+  "owner",
+  "kind",
+  "has_row_security",
+  "has_forced_row_security",
+  "is_nullable",
+  "default_expression",
+  "generated",
+  "identity",
+  "rendered_type",
+  "type_schema",
+  "type_name",
+  "type_kind",
+  "base_type_schema",
+  "base_type_name",
+  "base_type_kind",
+  "constraint_type",
+  "constraint_columns",
+  "ref_schema",
+  "ref_table",
+  "ref_columns",
+  "on_update",
+  "on_delete",
 ] as const
 
 function malformed(reason: string): AppError {
@@ -341,6 +578,157 @@ function mapIdentity(value: unknown): ColumnIdentityKind {
   throw malformed("identity must be empty, 'a', or 'd'")
 }
 
+function mapConstraintClassification(value: unknown): ConstraintClassification {
+  switch (value) {
+    case "p":
+      return "primary_key"
+    case "u":
+      return "unique"
+    case "f":
+      return "foreign_key"
+    case "c":
+      return "check"
+    case "x":
+      return "exclusion"
+    default:
+      throw malformed("constraint_type must be 'p', 'u', 'f', 'c', or 'x'")
+  }
+}
+
+function mapForeignKeyAction(value: unknown, field: string): ForeignKeyAction {
+  switch (value) {
+    case "a":
+      return "no_action"
+    case "r":
+      return "restrict"
+    case "c":
+      return "cascade"
+    case "n":
+      return "set_null"
+    case "d":
+      return "set_default"
+    default:
+      throw malformed(`${field} must be 'a', 'r', 'c', 'n', or 'd'`)
+  }
+}
+
+function requireStringArray(value: unknown, field: string): readonly string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw malformed(`${field} must be a non-empty array of strings`)
+  }
+  if (
+    value.some((element) => typeof element !== "string" || element.length === 0)
+  ) {
+    throw malformed(`${field} must contain only non-empty strings`)
+  }
+  return Object.freeze([...(value as string[])])
+}
+
+// Index key columns: null marks an expression position (pg_index indkey 0).
+function requireIndexColumnArray(
+  value: unknown,
+  field: string,
+): readonly (string | null)[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw malformed(`${field} must be a non-empty array`)
+  }
+  for (const element of value) {
+    if (
+      element !== null &&
+      (typeof element !== "string" || element.length === 0)
+    ) {
+      throw malformed(`${field} must contain only non-empty strings or null`)
+    }
+  }
+  return Object.freeze([...(value as (string | null)[])])
+}
+
+function mapConstraint(row: SchemaCatalogueRow): SchemaConstraint {
+  const classification = mapConstraintClassification(row.constraint_type)
+  const name = requireString(row.name, "name")
+
+  if (classification === "check") {
+    // A check constraint carries no column list and no referenced target.
+    requireNull(row.constraint_columns, "constraint_columns")
+    requireNull(row.ref_schema, "ref_schema")
+    requireNull(row.ref_table, "ref_table")
+    requireNull(row.ref_columns, "ref_columns")
+    requireNull(row.on_update, "on_update")
+    requireNull(row.on_delete, "on_delete")
+    return Object.freeze({
+      name,
+      classification,
+      columns: Object.freeze([] as readonly string[]),
+      references: null,
+      onUpdate: null,
+      onDelete: null,
+    })
+  }
+
+  const columns = requireStringArray(
+    row.constraint_columns,
+    "constraint_columns",
+  )
+
+  if (classification === "foreign_key") {
+    return Object.freeze({
+      name,
+      classification,
+      columns,
+      references: Object.freeze({
+        schema: requireString(row.ref_schema, "ref_schema"),
+        table: requireString(row.ref_table, "ref_table"),
+        columns: requireStringArray(row.ref_columns, "ref_columns"),
+      }),
+      onUpdate: mapForeignKeyAction(row.on_update, "on_update"),
+      onDelete: mapForeignKeyAction(row.on_delete, "on_delete"),
+    })
+  }
+
+  // primary_key, unique, exclusion: constrained columns only, never a
+  // referenced target or update/delete actions.
+  requireNull(row.ref_schema, "ref_schema")
+  requireNull(row.ref_table, "ref_table")
+  requireNull(row.ref_columns, "ref_columns")
+  requireNull(row.on_update, "on_update")
+  requireNull(row.on_delete, "on_delete")
+  return Object.freeze({
+    name,
+    classification,
+    columns,
+    references: null,
+    onUpdate: null,
+    onDelete: null,
+  })
+}
+
+function mapIndex(row: SchemaCatalogueRow): SchemaIndex {
+  const isUnique = requireBoolean(row.is_unique, "is_unique")
+  const isExpression = requireBoolean(row.is_expression, "is_expression")
+  const hasPredicate = requireBoolean(row.has_predicate, "has_predicate")
+  const columns = requireIndexColumnArray(row.index_columns, "index_columns")
+  if (!isExpression && columns.some((column) => column === null)) {
+    throw malformed("index columns contain null without is_expression")
+  }
+
+  // An expression index stays classified as an expression index even when it
+  // is also partial; the flags carry the exact state.
+  const classification: IndexClassification = isExpression
+    ? "expression_index"
+    : hasPredicate
+      ? "partial_index"
+      : "index"
+
+  return Object.freeze({
+    name: requireString(row.name, "name"),
+    classification,
+    isUnique,
+    isExpression,
+    hasPredicate,
+    columns,
+  })
+}
+
 function mapColumn(row: SchemaCatalogueRow): SchemaCatalogueColumn {
   const generated = mapGenerated(row.generated)
   // A pg_attrdef entry of a generated column is its generation expression,
@@ -404,23 +792,28 @@ interface ValidatedTable {
   readonly hasRowSecurity: boolean
   readonly hasForcedRowSecurity: boolean
   readonly columns: SchemaCatalogueColumn[]
+  readonly constraints: SchemaConstraint[]
+  readonly indexes: SchemaIndex[]
 }
 
 /**
  * Group validated catalogue rows into the deterministic public model. Every
  * row is validated before any model object is built: each row kind must
  * carry NULL in every field owned by another kind, duplicate schema names,
- * duplicate table keys, duplicate column ordinals/names, and orphan
- * tables/columns (rows whose parent does not appear in the read) all fail
- * closed with INTERNAL_ERROR instead of fabricating or silently dropping
- * metadata. Sorting happens here (by schema name, table name, column
- * ordinal) so results are deterministic regardless of input row order or
+ * table keys, column ordinals/names, constraint names, index names, and
+ * orphan tables/columns/constraints/indexes (rows whose parent does not
+ * appear in the read) all fail closed with INTERNAL_ERROR instead of
+ * fabricating or silently dropping metadata. Sorting happens here (schemas
+ * by name, tables by name, columns by ordinal, constraints and indexes by
+ * name) so results are deterministic regardless of input row order or
  * database collation.
  */
 export function mapSchemaCatalogue(
   schemaRows: readonly SchemaCatalogueRow[],
   tableRows: readonly SchemaCatalogueRow[],
   columnRows: readonly SchemaCatalogueRow[],
+  constraintRows: readonly SchemaCatalogueRow[] = [],
+  indexRows: readonly SchemaCatalogueRow[] = [],
 ): SchemaCatalogue {
   const schemaOwners = new Map<string, string>()
   for (const row of schemaRows) {
@@ -469,6 +862,8 @@ export function mapSchemaCatalogue(
         "has_forced_row_security",
       ),
       columns: [],
+      constraints: [],
+      indexes: [],
     })
   }
 
@@ -503,6 +898,56 @@ export function mapSchemaCatalogue(
     table.columns.push(column)
   }
 
+  for (const row of constraintRows) {
+    if (row.row_kind !== "constraint") {
+      throw malformed("constraint row set contains a non-constraint row")
+    }
+    for (const field of CONSTRAINT_ROW_NULL_FIELDS) {
+      requireNull(row[field], field)
+    }
+    const schemaName = requireString(row.schema_name, "schema_name")
+    const tableName = requireString(row.table_name, "table_name")
+    const table = tablesBySchema.get(schemaName)?.get(tableName)
+    if (table === undefined) {
+      throw malformed(
+        `constraint row for "${schemaName}.${tableName}" has no matching table row`,
+      )
+    }
+    const constraint = mapConstraint(row)
+    if (
+      table.constraints.some((existing) => existing.name === constraint.name)
+    ) {
+      throw malformed(
+        `duplicate constraint "${constraint.name}" in "${schemaName}.${tableName}"`,
+      )
+    }
+    table.constraints.push(constraint)
+  }
+
+  for (const row of indexRows) {
+    if (row.row_kind !== "index") {
+      throw malformed("index row set contains a non-index row")
+    }
+    for (const field of INDEX_ROW_NULL_FIELDS) {
+      requireNull(row[field], field)
+    }
+    const schemaName = requireString(row.schema_name, "schema_name")
+    const tableName = requireString(row.table_name, "table_name")
+    const table = tablesBySchema.get(schemaName)?.get(tableName)
+    if (table === undefined) {
+      throw malformed(
+        `index row for "${schemaName}.${tableName}" has no matching table row`,
+      )
+    }
+    const index = mapIndex(row)
+    if (table.indexes.some((existing) => existing.name === index.name)) {
+      throw malformed(
+        `duplicate index "${index.name}" in "${schemaName}.${tableName}"`,
+      )
+    }
+    table.indexes.push(index)
+  }
+
   const schemas: SchemaCatalogueSchema[] = []
   for (const [name, owner] of schemaOwners) {
     const tables: SchemaCatalogueTable[] = []
@@ -510,6 +955,8 @@ export function mapSchemaCatalogue(
     if (tableMap !== undefined) {
       for (const [tableName, table] of tableMap) {
         table.columns.sort((a, b) => a.ordinal - b.ordinal)
+        table.constraints.sort(compareByName)
+        table.indexes.sort(compareByName)
         tables.push(
           Object.freeze({
             schema: name,
@@ -519,6 +966,8 @@ export function mapSchemaCatalogue(
             hasRowSecurity: table.hasRowSecurity,
             hasForcedRowSecurity: table.hasForcedRowSecurity,
             columns: Object.freeze(table.columns),
+            constraints: Object.freeze(table.constraints),
+            indexes: Object.freeze(table.indexes),
           }),
         )
       }
@@ -556,6 +1005,8 @@ export async function readSchemaCatalogue(
   const schemaRows: SchemaCatalogueRow[] = []
   const tableRows: SchemaCatalogueRow[] = []
   const columnRows: SchemaCatalogueRow[] = []
+  const constraintRows: SchemaCatalogueRow[] = []
+  const indexRows: SchemaCatalogueRow[] = []
   for (const row of result.rows) {
     switch (row.row_kind) {
       case "schema":
@@ -567,12 +1018,26 @@ export async function readSchemaCatalogue(
       case "column":
         columnRows.push(row)
         break
+      case "constraint":
+        constraintRows.push(row)
+        break
+      case "index":
+        indexRows.push(row)
+        break
       default:
-        throw malformed("row_kind must be 'schema', 'table', or 'column'")
+        throw malformed(
+          "row_kind must be 'schema', 'table', 'column', 'constraint', or 'index'",
+        )
     }
   }
 
-  return mapSchemaCatalogue(schemaRows, tableRows, columnRows)
+  return mapSchemaCatalogue(
+    schemaRows,
+    tableRows,
+    columnRows,
+    constraintRows,
+    indexRows,
+  )
 }
 
 /** Create a read-only schema-catalogue reader over an injected query. */
