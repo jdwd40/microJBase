@@ -12,7 +12,16 @@
 //   (replay, checksum conflict, retry-of-failure, in-progress). Stateful
 //   guards such as "relation already exists" must therefore never shadow the
 //   D-025 replay contract for a retried key. A missing or unreadable record
-//   simply means "not seen before" and preflight runs normally.
+//   simply means "not seen before" and preflight runs normally. Commands that
+//   embed a catalogue-derived type in their compiled statement
+//   (changeColumnType, setColumnDefault) reconstruct that type from the
+//   recorded command on this path, never from the live catalogue: the
+//   recorded outcome is authoritative, and the live type may legitimately
+//   have moved on (or the table may be gone) after a recorded success.
+// - Dry runs always preflight: a reused key must not let a dry run skip the
+//   confirmation, ownership, exposure, or dependency guards, because the
+//   executor's dry-run branch still issues the compiled statements inside a
+//   rolled-back transaction (D-027).
 // - Preflight guards run before compilation for new keys and reject with
 //   stable error codes, so a refused command never reaches the executor and
 //   never writes history. Preflight reads the immutable catalogue reader
@@ -74,9 +83,13 @@ import {
   type DdlColumnType,
   type ExecuteOptions,
   type ExecuteOutcome,
+  isDdlColumnType,
   type SchemaDdlExecutor,
 } from "./schema-ddl.js"
-import { createSchemaOperationLog } from "./schema-operation-log.js"
+import {
+  createSchemaOperationLog,
+  type SchemaOperationRecord,
+} from "./schema-operation-log.js"
 import { classifySchemaObject } from "./schema-snapshot.js"
 
 export interface MutationCommandBase {
@@ -338,6 +351,18 @@ export function createSchemaMutationService(
     return (await operationLog.get(idempotencyKey)) !== null
   }
 
+  // Guards run for every new key AND for every dry run: the executor's
+  // dry-run branch still issues the compiled statements (inside a rollback),
+  // so a reused key must not bypass confirmation/ownership/exposure/dependency
+  // checks (D-027).
+  async function preflightApplies(
+    input: MutationCommandBase,
+  ): Promise<boolean> {
+    return (
+      input.dryRun === true || !(await hasExistingRecord(input.idempotencyKey))
+    )
+  }
+
   async function readCatalogue(): Promise<SchemaCatalogue> {
     return deps.catalogue.read()
   }
@@ -444,25 +469,30 @@ export function createSchemaMutationService(
     return row.has_nulls
   }
 
-  // Resolve a column's managed type from the catalogue without the ownership
-  // or exposure guards. Used on the replay path, where the executor already
-  // owns the outcome and compilation still needs the concrete type to render
-  // the same statement for the checksum comparison.
-  async function resolveColumnType(
-    schema: string,
-    table: string,
-    columnName: string,
-  ): Promise<DdlColumnType> {
-    const catalogue = await readCatalogue()
-    const tableObject = await requireTable(catalogue, schema, table)
-    const columnObject = requireColumn(tableObject, columnName)
-    const type = mapCatalogueType(columnObject.renderedType)
-    if (type === null) {
-      throw validation(
-        "Column type is not managed by the schema type allowlist",
+  // Reads a type field back from the recorded command of an existing
+  // operation. On the replay path the executor already owns the outcome and
+  // compilation only needs to render the identical statement for the
+  // checksum comparison, so the recorded command — never the live catalogue —
+  // is the source of truth: after a recorded success the live type may
+  // legitimately have moved on (or the table may be gone), and re-deriving
+  // the type from the catalogue would wrongly reject the replay (D-025).
+  function recordedCommandType(
+    record: SchemaOperationRecord,
+    field: "fromType" | "type",
+  ): DdlColumnType {
+    const command = record.command
+    const value =
+      typeof command === "object" && command !== null && !Array.isArray(command)
+        ? (command as Record<string, JsonValue>)[field]
+        : undefined
+    if (!isDdlColumnType(value)) {
+      throw new AppError(
+        "INTERNAL_ERROR",
+        `Malformed schema operation record: command.${field} is not a managed column type`,
+        500,
       )
     }
-    return type
+    return value
   }
 
   function execute(
@@ -485,7 +515,7 @@ export function createSchemaMutationService(
     async createTable(input: CreateTableCommand): Promise<ExecuteOutcome> {
       assertDdlIdentifier(input.table)
       assertNotReservedTableName(input.table)
-      if (!(await hasExistingRecord(input.idempotencyKey))) {
+      if (await preflightApplies(input)) {
         const catalogue = await readCatalogue()
         const schemaObject = await requireSchema(catalogue, input.schema)
         if (schemaObject.tables.some((entry) => entry.name === input.table)) {
@@ -523,7 +553,7 @@ export function createSchemaMutationService(
       assertDdlIdentifier(input.table)
       assertDdlIdentifier(input.newName)
       assertNotReservedTableName(input.newName)
-      if (!(await hasExistingRecord(input.idempotencyKey))) {
+      if (await preflightApplies(input)) {
         const catalogue = await readCatalogue()
         const schemaObject = await requireSchema(catalogue, input.schema)
         const table = await requireTable(catalogue, input.schema, input.table)
@@ -555,7 +585,7 @@ export function createSchemaMutationService(
 
     async dropTable(input: DropTableCommand): Promise<ExecuteOutcome> {
       assertDdlIdentifier(input.table)
-      if (!(await hasExistingRecord(input.idempotencyKey))) {
+      if (await preflightApplies(input)) {
         if (input.confirm !== `${input.schema}.${input.table}`) {
           throw validation(
             'Destructive drops require the exact confirmation value "schema.table"',
@@ -599,7 +629,7 @@ export function createSchemaMutationService(
       assertDdlIdentifier(input.table)
       assertDdlIdentifier(input.column.name)
       assertNotIdColumnName(input.column.name)
-      if (!(await hasExistingRecord(input.idempotencyKey))) {
+      if (await preflightApplies(input)) {
         const catalogue = await readCatalogue()
         const table = await requireTable(catalogue, input.schema, input.table)
         assertOwned(table)
@@ -642,7 +672,7 @@ export function createSchemaMutationService(
       assertDdlIdentifier(input.column)
       assertDdlIdentifier(input.newName)
       assertNotIdColumnName(input.newName)
-      if (!(await hasExistingRecord(input.idempotencyKey))) {
+      if (await preflightApplies(input)) {
         const catalogue = await readCatalogue()
         const table = await requireTable(catalogue, input.schema, input.table)
         assertOwned(table)
@@ -679,7 +709,7 @@ export function createSchemaMutationService(
     async dropColumn(input: DropColumnCommand): Promise<ExecuteOutcome> {
       assertDdlIdentifier(input.table)
       assertDdlIdentifier(input.column)
-      if (!(await hasExistingRecord(input.idempotencyKey))) {
+      if (await preflightApplies(input)) {
         if (
           input.confirm !== `${input.schema}.${input.table}.${input.column}`
         ) {
@@ -727,15 +757,17 @@ export function createSchemaMutationService(
       assertDdlIdentifier(input.table)
       assertDdlIdentifier(input.column)
       let type: DdlColumnType
-      if (!(await hasExistingRecord(input.idempotencyKey))) {
+      const existing = await operationLog.get(input.idempotencyKey)
+      if (input.dryRun === true || existing === null) {
+        // A dry run simulates the command against the live catalogue even
+        // for a reused key (it never consults history); a retried key
+        // recompiles from the recorded command, never the live catalogue.
         const catalogue = await readCatalogue()
         const table = await requireTable(catalogue, input.schema, input.table)
         assertOwned(table)
         assertNotExposed(input.schema, input.table)
         const column = requireColumn(table, input.column)
-        if (column.generated !== "none") {
-          throw validation("Generated columns cannot have defaults")
-        }
+        assertPlainColumn(column)
         const mapped = mapCatalogueType(column.renderedType)
         if (mapped === null) {
           throw validation(
@@ -744,7 +776,7 @@ export function createSchemaMutationService(
         }
         type = mapped
       } else {
-        type = await resolveColumnType(input.schema, input.table, input.column)
+        type = recordedCommandType(existing, "type")
       }
 
       const plan = compileSetColumnDefault({
@@ -759,6 +791,7 @@ export function createSchemaMutationService(
         table: input.table,
         column: input.column,
         default: input.default,
+        type,
       }
       return execute(plan, {
         idempotencyKey: input.idempotencyKey,
@@ -772,12 +805,13 @@ export function createSchemaMutationService(
     async dropColumnDefault(input: ColumnCommandBase): Promise<ExecuteOutcome> {
       assertDdlIdentifier(input.table)
       assertDdlIdentifier(input.column)
-      if (!(await hasExistingRecord(input.idempotencyKey))) {
+      if (await preflightApplies(input)) {
         const catalogue = await readCatalogue()
         const table = await requireTable(catalogue, input.schema, input.table)
         assertOwned(table)
         assertNotExposed(input.schema, input.table)
-        requireColumn(table, input.column)
+        const column = requireColumn(table, input.column)
+        assertPlainColumn(column)
       }
 
       const plan = compileDropColumnDefault({
@@ -802,7 +836,7 @@ export function createSchemaMutationService(
     async setColumnNotNull(input: ColumnCommandBase): Promise<ExecuteOutcome> {
       assertDdlIdentifier(input.table)
       assertDdlIdentifier(input.column)
-      if (!(await hasExistingRecord(input.idempotencyKey))) {
+      if (await preflightApplies(input)) {
         const catalogue = await readCatalogue()
         const table = await requireTable(catalogue, input.schema, input.table)
         assertOwned(table)
@@ -837,7 +871,7 @@ export function createSchemaMutationService(
     async dropColumnNotNull(input: ColumnCommandBase): Promise<ExecuteOutcome> {
       assertDdlIdentifier(input.table)
       assertDdlIdentifier(input.column)
-      if (!(await hasExistingRecord(input.idempotencyKey))) {
+      if (await preflightApplies(input)) {
         const catalogue = await readCatalogue()
         const table = await requireTable(catalogue, input.schema, input.table)
         assertOwned(table)
@@ -870,7 +904,14 @@ export function createSchemaMutationService(
       assertDdlIdentifier(input.table)
       assertDdlIdentifier(input.column)
       let fromType: DdlColumnType
-      if (!(await hasExistingRecord(input.idempotencyKey))) {
+      const existing = await operationLog.get(input.idempotencyKey)
+      if (input.dryRun === true || existing === null) {
+        // A dry run simulates the command against the live catalogue even
+        // for a reused key (it never consults history); a retried key
+        // recompiles from the recorded command, never the live catalogue —
+        // after a recorded success the catalogue legitimately shows the
+        // destination type, which is not in the conversion matrix from
+        // itself.
         const catalogue = await readCatalogue()
         const table = await requireTable(catalogue, input.schema, input.table)
         assertOwned(table)
@@ -896,11 +937,7 @@ export function createSchemaMutationService(
         }
         fromType = mapped
       } else {
-        fromType = await resolveColumnType(
-          input.schema,
-          input.table,
-          input.column,
-        )
+        fromType = recordedCommandType(existing, "fromType")
       }
 
       const plan = compileChangeColumnType({

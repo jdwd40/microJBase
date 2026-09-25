@@ -537,6 +537,15 @@ describe("translateDdlError", () => {
     ).toMatchObject({ code: "INTERNAL_ERROR", status: 500 })
   })
 
+  it("maps the locked source-type re-check sqlstate to a safe CONFLICT", () => {
+    const mapped = translateDdlError({
+      code: "9C001",
+      message: "compiled source type no longer matches the column",
+    })
+    expect(mapped).toMatchObject({ code: "CONFLICT", status: 409 })
+    expect(mapped.message).not.toContain("format_type")
+  })
+
   it("never leaks pg internals for unmapped or non-pg errors", () => {
     const unmapped = translateDdlError({
       code: "XX000",
@@ -1332,26 +1341,53 @@ describe("V02-07..V02-09 table and column builders", () => {
   })
 
   it("compileChangeColumnType compiles only matrix-approved conversions", () => {
-    expect(
-      compileChangeColumnType({
-        schema: "app",
-        table: "notes",
-        column: "priority",
-        fromType: "integer",
-        toType: "bigint",
-      }).statements,
-    ).toEqual(['ALTER TABLE "app"."notes" ALTER COLUMN "priority" TYPE bigint'])
-    expect(
-      compileChangeColumnType({
-        schema: "app",
-        table: "notes",
-        column: "due_on",
-        fromType: "date",
-        toType: "timestamp",
-      }).statements,
-    ).toEqual([
+    const integerToBigint = compileChangeColumnType({
+      schema: "app",
+      table: "notes",
+      column: "priority",
+      fromType: "integer",
+      toType: "bigint",
+    })
+    // The locked source-type re-check runs first inside the executor's
+    // advisory-locked transaction; the ALTER itself is unchanged.
+    expect(integerToBigint.statements).toHaveLength(2)
+    expect(integerToBigint.statements[1]).toBe(
+      'ALTER TABLE "app"."notes" ALTER COLUMN "priority" TYPE bigint',
+    )
+    expect(integerToBigint.statements[0]).toContain("format_type(")
+    expect(integerToBigint.statements[0]).toContain("RAISE EXCEPTION")
+    expect(integerToBigint.statements[0]).toContain("'9C001'")
+
+    const dateToTimestamp = compileChangeColumnType({
+      schema: "app",
+      table: "notes",
+      column: "due_on",
+      fromType: "date",
+      toType: "timestamp",
+    })
+    expect(dateToTimestamp.statements[1]).toBe(
       'ALTER TABLE "app"."notes" ALTER COLUMN "due_on" TYPE timestamp',
-    ])
+    )
+  })
+
+  it("compileChangeColumnType pins the locked re-check to the compiled fromType", () => {
+    const plan = compileChangeColumnType({
+      schema: "app",
+      table: "notes",
+      column: "due_on",
+      fromType: "date",
+      toType: "timestamp",
+    })
+    const assertion = plan.statements[0]
+    if (assertion === undefined) {
+      throw new Error("expected a locked re-check statement")
+    }
+    // The re-read is keyed by the validated identifiers and compared against
+    // the catalogue rendering of the compiled fromType (not its SQL alias).
+    expect(assertion).toContain("n.nspname = 'app'")
+    expect(assertion).toContain("c.relname = 'notes'")
+    expect(assertion).toContain("a.attname = 'due_on'")
+    expect(assertion).toContain("IS DISTINCT FROM 'date'")
   })
 
   it("compileChangeColumnType refuses pairs outside the frozen matrix", () => {

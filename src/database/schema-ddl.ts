@@ -80,6 +80,10 @@ const TYPE_ALLOWLIST = {
 
 export type DdlColumnType = keyof typeof TYPE_ALLOWLIST
 
+export function isDdlColumnType(value: unknown): value is DdlColumnType {
+  return typeof value === "string" && Object.hasOwn(TYPE_ALLOWLIST, value)
+}
+
 const INTERNAL_SCHEMA_NAMES = new Set([
   "microjbase",
   "pg_catalog",
@@ -529,6 +533,29 @@ export interface ChangeColumnTypeSpec {
   readonly toType: DdlColumnType
 }
 
+// How format_type(atttypid, atttypmod) renders each allowlisted type, so the
+// locked re-check below compares against the same rendering the catalogue
+// reader (and therefore the compiler's fromType) is derived from.
+const CATALOGUE_TYPE_RENDERINGS: Readonly<Record<DdlColumnType, string>> =
+  Object.freeze({
+    text: "text",
+    integer: "integer",
+    bigint: "bigint",
+    boolean: "boolean",
+    uuid: "uuid",
+    timestamp: "timestamp without time zone",
+    timestamptz: "timestamp with time zone",
+    date: "date",
+    numeric: "numeric",
+    jsonb: "jsonb",
+  })
+
+// SQLSTATE raised by the locked type re-check when the catalogue type inside
+// the advisory-locked transaction no longer matches the compiled fromType.
+// Class 9C is application-defined, and DDL_ERROR_MAP translates it to the
+// in-progress-style conflict so a stale compilation fails closed.
+export const STALE_SOURCE_TYPE_SQLSTATE = "9C001"
+
 export function compileRenameTable(spec: RenameTableSpec): DdlPlan {
   assertManageableSchema(spec.schema)
   const statement = `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} RENAME TO ${quoteIdentifier(spec.newName)}`
@@ -647,15 +674,51 @@ export function compileChangeColumnType(spec: ChangeColumnTypeSpec): DdlPlan {
     )
   }
   const targetSqlType = TYPE_ALLOWLIST[spec.toType]
+  const assertion = compileLockedSourceTypeAssertion(spec)
   const statement =
     `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ` +
     `ALTER COLUMN ${quoteIdentifier(spec.column)} TYPE ${targetSqlType}`
   return sealPlan({
-    statements: [statement],
+    statements: [assertion, statement],
     description: `change the type of column ${spec.column} on ${spec.schema}.${spec.table} from ${spec.fromType} to ${spec.toType}`,
   })
 }
 
+// The safe-conversion matrix is applied at compile time, outside the advisory
+// lock; a concurrent type change committed between compilation and execution
+// would otherwise slip past the matrix (PostgreSQL happily "converts"
+// numeric->bigint or timestamptz->timestamp, rounding or dropping data). The
+// executor runs this assertion as the first statement of the plan, inside the
+// same transaction and after the same advisory key as the ALTER TYPE, and it
+// re-reads the catalogue type under that lock. Any drift from the compiled
+// fromType raises STALE_SOURCE_TYPE_SQLSTATE and the whole transaction rolls
+// back, so the matrix can never be applied to a column the compiler never
+// inspected. Identifiers and the expected rendering are strictly validated
+// before they are embedded, and the body carries no caller input beyond them.
+function compileLockedSourceTypeAssertion(spec: ChangeColumnTypeSpec): string {
+  const expectedRendering = CATALOGUE_TYPE_RENDERINGS[spec.fromType]
+  return `DO $microjbase$
+DECLARE
+  microjbase_actual_type text;
+BEGIN
+  SELECT format_type(a.atttypid, a.atttypmod) INTO microjbase_actual_type
+  FROM pg_catalog.pg_attribute a
+  JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = ${quoteLiteral(spec.schema)}
+    AND c.relname = ${quoteLiteral(spec.table)}
+    AND a.attname = ${quoteLiteral(spec.column)}
+    AND a.attnum > 0
+    AND NOT a.attisdropped;
+  IF microjbase_actual_type IS DISTINCT FROM ${quoteLiteral(expectedRendering)} THEN
+    RAISE EXCEPTION 'compiled source type no longer matches the column'
+      USING ERRCODE = '${STALE_SOURCE_TYPE_SQLSTATE}';
+  END IF;
+END
+$microjbase$`
+}
+
+// ---------------------------------------------------------------------------
 export interface ExecuteOptions {
   readonly idempotencyKey: string
   readonly commandType: string
@@ -721,6 +784,15 @@ const DDL_ERROR_MAP: Record<
     code: "INTERNAL_ERROR",
     message: "Operation conflicted with a concurrent operation",
     status: 500,
+  },
+  // Raised by the locked source-type re-check compiled into every
+  // changeColumnType plan: the catalogue type drifted from the compiled
+  // fromType before the advisory-locked transaction ran.
+  "9C001": {
+    code: "CONFLICT",
+    message:
+      "The column type changed after the operation was compiled; retry with a fresh key",
+    status: 409,
   },
 }
 

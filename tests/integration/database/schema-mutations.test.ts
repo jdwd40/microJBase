@@ -1268,3 +1268,324 @@ describe("V02-09 defaults, nullability, and the conversion matrix", () => {
     }
   })
 })
+
+describe("R3 review findings (JDW-21)", () => {
+  it("replays a changeColumnType key from the recorded command after the catalogue shows the destination type", async () => {
+    await createManagedTable("r3_type_replay")
+    await service.addColumn({
+      idempotencyKey: "v0207-r3-type-add",
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "r3_type_replay",
+      column: {
+        name: "priority",
+        type: "integer",
+        nullable: false,
+        default: { kind: "none" },
+      },
+    })
+    await insertRow("r3_type_replay", { title: "a", priority: 7 })
+
+    const converted = await service.changeColumnType({
+      idempotencyKey: "v0207-r3-type-convert",
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "r3_type_replay",
+      column: "priority",
+      toType: "bigint",
+    })
+    expect(converted.replayed).toBe(false)
+
+    // The catalogue now shows bigint; the retry must still compile the
+    // recorded integer -> bigint statement and be classified as a replay.
+    const replay = await service.changeColumnType({
+      idempotencyKey: "v0207-r3-type-convert",
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "r3_type_replay",
+      column: "priority",
+      toType: "bigint",
+    })
+    expect(replay.replayed).toBe(true)
+    expect(replay.record?.status).toBe("succeeded")
+    expect(await selectValues("r3_type_replay", "priority")).toEqual(["7"])
+    const catalogued = await readCatalogueTable(APP_SCHEMA, "r3_type_replay")
+    expect(
+      catalogued?.columns.find((entry) => entry.name === "priority")
+        ?.renderedType,
+    ).toBe("bigint")
+
+    // A different toType on the used key still reaches the executor and
+    // conflicts on the checksum.
+    const conflict = await service
+      .changeColumnType({
+        idempotencyKey: "v0207-r3-type-convert",
+        actor: "operator",
+        schema: APP_SCHEMA,
+        table: "r3_type_replay",
+        column: "priority",
+        toType: "numeric",
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      )
+    expect(conflict).toMatchObject({ code: "CONFLICT", status: 409 })
+  })
+
+  it("replays a setColumnDefault key without re-reading the live column type", async () => {
+    await createManagedTable("r3_default_replay")
+    await service.addColumn({
+      idempotencyKey: "v0207-r3-default-add",
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "r3_default_replay",
+      column: {
+        name: "due_on",
+        type: "date",
+        nullable: true,
+        default: { kind: "none" },
+      },
+    })
+
+    const set = await service.setColumnDefault({
+      idempotencyKey: "v0207-r3-default-set",
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "r3_default_replay",
+      column: "due_on",
+      default: { kind: "literal", value: "2026-01-01" },
+    })
+    expect(set.replayed).toBe(false)
+
+    // A later conversion moves the live type to timestamp (the default is
+    // dropped first, as the conversion guard requires); the recorded key
+    // must still replay instead of rejecting the original date literal.
+    await service.dropColumnDefault({
+      idempotencyKey: "v0207-r3-default-clear",
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "r3_default_replay",
+      column: "due_on",
+    })
+    await service.changeColumnType({
+      idempotencyKey: "v0207-r3-default-convert",
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "r3_default_replay",
+      column: "due_on",
+      toType: "timestamp",
+    })
+
+    const replay = await service.setColumnDefault({
+      idempotencyKey: "v0207-r3-default-set",
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "r3_default_replay",
+      column: "due_on",
+      default: { kind: "literal", value: "2026-01-01" },
+    })
+    expect(replay.replayed).toBe(true)
+    expect(replay.record?.status).toBe("succeeded")
+    expect((await historyRow("v0207-r3-default-set"))?.status).toBe("succeeded")
+  })
+
+  it("refuses dry-run drops on reused keys for exposed tables with a wrong confirmation", async () => {
+    await createManagedTable("r3_dry_guard")
+    expose(APP_SCHEMA, "r3_dry_guard")
+    try {
+      // Give the key a recorded operation so the replay-first probe finds a
+      // row; a dry run must still run the confirmation/exposure guards.
+      await createManagedTable("r3_dry_source")
+      await service.dropTable({
+        idempotencyKey: "v0207-r3-dry-key",
+        actor: "operator",
+        schema: APP_SCHEMA,
+        table: "r3_dry_source",
+        confirm: `${APP_SCHEMA}.r3_dry_source`,
+      })
+
+      const error = await service
+        .dropTable({
+          idempotencyKey: "v0207-r3-dry-key",
+          actor: "operator",
+          schema: APP_SCHEMA,
+          table: "r3_dry_guard",
+          confirm: "nope",
+          dryRun: true,
+        })
+        .then(
+          () => null,
+          (caught: unknown) => caught,
+        )
+      expect(error).toMatchObject({ code: "VALIDATION_ERROR", status: 400 })
+      expect(await tableExists(APP_SCHEMA, "r3_dry_guard")).toBe(true)
+      expect(await historyRow("v0207-r3-dry-key")).toMatchObject({
+        status: "succeeded",
+      })
+    } finally {
+      unexposeAll()
+    }
+  })
+
+  it("refuses identity and generated columns for both default commands", async () => {
+    await createManagedTable("r3_identity_columns")
+    await withClient(adminRoleUrl(), async (client) => {
+      await client.query(
+        `ALTER TABLE ${quoteIdentifier(APP_SCHEMA)}.r3_identity_columns
+           ADD COLUMN serial_no bigint GENERATED ALWAYS AS IDENTITY`,
+      )
+      await client.query(
+        `ALTER TABLE ${quoteIdentifier(APP_SCHEMA)}.r3_identity_columns
+           ADD COLUMN computed integer GENERATED ALWAYS AS (1) STORED`,
+      )
+    })
+
+    const setIdentity = await service
+      .setColumnDefault({
+        idempotencyKey: "v0207-r3-identity-set",
+        actor: "operator",
+        schema: APP_SCHEMA,
+        table: "r3_identity_columns",
+        column: "serial_no",
+        default: { kind: "literal", value: 1 },
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      )
+    expect(setIdentity).toMatchObject({ code: "VALIDATION_ERROR", status: 400 })
+
+    const dropIdentity = await service
+      .dropColumnDefault({
+        idempotencyKey: "v0207-r3-identity-drop",
+        actor: "operator",
+        schema: APP_SCHEMA,
+        table: "r3_identity_columns",
+        column: "serial_no",
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      )
+    expect(dropIdentity).toMatchObject({
+      code: "VALIDATION_ERROR",
+      status: 400,
+    })
+
+    const dropGenerated = await service
+      .dropColumnDefault({
+        idempotencyKey: "v0207-r3-generated-drop",
+        actor: "operator",
+        schema: APP_SCHEMA,
+        table: "r3_identity_columns",
+        column: "computed",
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      )
+    expect(dropGenerated).toMatchObject({
+      code: "VALIDATION_ERROR",
+      status: 400,
+    })
+
+    expect(await historyRow("v0207-r3-identity-set")).toBeNull()
+    expect(await historyRow("v0207-r3-identity-drop")).toBeNull()
+    expect(await historyRow("v0207-r3-generated-drop")).toBeNull()
+  })
+
+  it("fails closed when the locked catalogue type drifted from the compiled fromType", async () => {
+    await createManagedTable("r3_stale_convert")
+    await service.addColumn({
+      idempotencyKey: "v0207-r3-stale-add",
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "r3_stale_convert",
+      column: {
+        name: "amount",
+        type: "numeric",
+        nullable: false,
+        default: { kind: "none" },
+      },
+    })
+    await withClient(adminRoleUrl(), async (client) => {
+      await client.query(
+        `INSERT INTO ${quoteIdentifier(APP_SCHEMA)}.r3_stale_convert (title, amount) VALUES ('half', 1.5)`,
+      )
+    })
+
+    // The catalogue now claims the column is integer (a concurrent change the
+    // compiler cannot see); integer -> bigint passes the frozen matrix, but
+    // the locked re-check inside the DDL transaction must fail closed instead
+    // of letting PostgreSQL round 1.5 to 2.
+    const lyingCatalogue: SchemaCatalogueReader = {
+      read: async () => {
+        const snapshot = await catalogue.read()
+        return {
+          schemas: snapshot.schemas.map((schemaObject) => ({
+            ...schemaObject,
+            tables: schemaObject.tables.map((tableObject) => ({
+              ...tableObject,
+              columns: tableObject.columns.map((columnObject) =>
+                schemaObject.name === APP_SCHEMA &&
+                tableObject.name === "r3_stale_convert" &&
+                columnObject.name === "amount"
+                  ? {
+                      ...columnObject,
+                      renderedType: "integer",
+                      type: {
+                        schema: "pg_catalog",
+                        name: "int4",
+                        kind: "base" as const,
+                      },
+                      baseType: null,
+                    }
+                  : columnObject,
+              ),
+            })),
+          })),
+        }
+      },
+    }
+    const lyingService = createSchemaMutationService({
+      pool: adminPool,
+      catalogue: lyingCatalogue,
+      registry,
+      adminRole: ADMIN_ROLE,
+      executor: createSchemaDdlExecutor({
+        pool: adminPool,
+        createOperationLog: (query) => createSchemaOperationLog({ query }),
+      }),
+    })
+
+    const error = await lyingService
+      .changeColumnType({
+        idempotencyKey: "v0207-r3-stale-convert",
+        actor: "operator",
+        schema: APP_SCHEMA,
+        table: "r3_stale_convert",
+        column: "amount",
+        toType: "bigint",
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      )
+    expect(error).toMatchObject({ code: "CONFLICT", status: 409 })
+
+    const values = await withClient(adminRoleUrl(), async (client) => {
+      const result = await client.query<{ amount: unknown }>(
+        `SELECT amount FROM ${quoteIdentifier(APP_SCHEMA)}.r3_stale_convert`,
+      )
+      return result.rows.map((row) => row.amount)
+    })
+    expect(values).toEqual(["1.5"])
+    const catalogued = await readCatalogueTable(APP_SCHEMA, "r3_stale_convert")
+    expect(
+      catalogued?.columns.find((entry) => entry.name === "amount")
+        ?.renderedType,
+    ).toBe("numeric")
+    expect(await historyRow("v0207-r3-stale-convert")).toBeNull()
+  })
+})

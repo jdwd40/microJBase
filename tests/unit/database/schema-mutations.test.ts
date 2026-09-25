@@ -1087,9 +1087,12 @@ describe("column defaults, nullability, and type changes", () => {
       fromType: "integer",
       toType: "bigint",
     })
-    expect(
-      (call?.plan as { statements: readonly string[] }).statements,
-    ).toEqual(['ALTER TABLE "app"."notes" ALTER COLUMN "priority" TYPE bigint'])
+    const statements = (call?.plan as { statements: readonly string[] })
+      .statements
+    expect(statements[1]).toBe(
+      'ALTER TABLE "app"."notes" ALTER COLUMN "priority" TYPE bigint',
+    )
+    expect(statements[0]).toContain("format_type(")
   })
 
   it("refuses type changes with defaults, dependencies, or outside the matrix", async () => {
@@ -1131,6 +1134,349 @@ describe("column defaults, nullability, and type changes", () => {
       code: "VALIDATION_ERROR",
       status: 400,
     })
+    expect(calls).toHaveLength(0)
+  })
+})
+
+describe("safeguarded default commands", () => {
+  const guardedCatalogue = catalogue([
+    table("notes", {
+      columns: [
+        column("id", { isNullable: false, renderedType: "uuid" }),
+        column("title"),
+        column("computed", { generated: "stored" }),
+        column("serial_no", { identity: "always" }),
+      ],
+    }),
+  ])
+
+  it("setColumnDefault refuses generated and identity columns", async () => {
+    const { service, calls } = makeService({ catalogue: guardedCatalogue })
+
+    for (const [columnName, key] of [
+      ["computed", "generated"],
+      ["serial_no", "identity"],
+    ] as const) {
+      const error = await rejection(
+        service.setColumnDefault({
+          idempotencyKey: `sd-${key}`,
+          actor: "operator",
+          schema: APP_SCHEMA,
+          table: "notes",
+          column: columnName,
+          default: { kind: "literal", value: 1 },
+        }),
+      )
+      expect(error).toMatchObject({ code: "VALIDATION_ERROR", status: 400 })
+    }
+    expect(calls).toHaveLength(0)
+  })
+
+  it("dropColumnDefault refuses generated and identity columns", async () => {
+    const { service, calls } = makeService({ catalogue: guardedCatalogue })
+
+    for (const [columnName, key] of [
+      ["computed", "generated"],
+      ["serial_no", "identity"],
+    ] as const) {
+      const error = await rejection(
+        service.dropColumnDefault({
+          idempotencyKey: `dd-${key}`,
+          actor: "operator",
+          schema: APP_SCHEMA,
+          table: "notes",
+          column: columnName,
+        }),
+      )
+      expect(error).toMatchObject({ code: "VALIDATION_ERROR", status: 400 })
+    }
+    expect(calls).toHaveLength(0)
+  })
+})
+
+describe("replay reconstructs the compiled statement from the recorded command", () => {
+  function seededOperationRecord(
+    key: string,
+    commandType: string,
+    command: Record<string, unknown>,
+  ) {
+    return {
+      id: "1",
+      idempotency_key: key,
+      command_type: commandType,
+      command,
+      checksum: "c".repeat(64),
+      status: "succeeded",
+      actor_fingerprint: "f".repeat(64),
+      error_code: null,
+      result: null,
+      created_at: new Date("2026-09-25T00:00:00.000Z"),
+      finished_at: new Date("2026-09-25T00:00:01.000Z"),
+    }
+  }
+
+  function recordPool(
+    records: Readonly<Record<string, Record<string, unknown>>>,
+  ): Pool {
+    return {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.includes("FROM microjbase.schema_operations")) {
+          const key = values?.[0]
+          const row = typeof key === "string" ? records[key] : undefined
+          return { rows: row === undefined ? [] : [row] } as never
+        }
+        throw new Error(`unexpected preflight query: ${text}`)
+      },
+    } as unknown as Pool
+  }
+
+  it("changeColumnType replays from the recorded fromType, not the live destination type", async () => {
+    const key = "type-replay-key"
+    const { service, calls } = makeService({
+      // The catalogue already shows the destination type: a retry that
+      // re-derived fromType from the live catalogue could not compile.
+      catalogue: catalogue([
+        table("notes", {
+          columns: [
+            column("id", { isNullable: false, renderedType: "uuid" }),
+            column("priority", { isNullable: false, renderedType: "bigint" }),
+          ],
+        }),
+      ]),
+      pool: recordPool({
+        [key]: seededOperationRecord(key, "schema.column.type.change", {
+          schema: APP_SCHEMA,
+          table: "notes",
+          column: "priority",
+          fromType: "integer",
+          toType: "bigint",
+        }),
+      }),
+    })
+
+    const outcome = await service.changeColumnType({
+      idempotencyKey: key,
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "notes",
+      column: "priority",
+      toType: "bigint",
+    })
+    expect(outcome.replayed).toBe(false)
+    expect(calls).toHaveLength(1)
+    const call = calls[0]
+    expect(call?.options.command).toEqual({
+      schema: APP_SCHEMA,
+      table: "notes",
+      column: "priority",
+      fromType: "integer",
+      toType: "bigint",
+    })
+    const statements = (call?.plan as { statements: readonly string[] })
+      .statements
+    expect(statements[1]).toBe(
+      'ALTER TABLE "app"."notes" ALTER COLUMN "priority" TYPE bigint',
+    )
+  })
+
+  it("setColumnDefault replays from the recorded type, not the live type", async () => {
+    const key = "default-replay-key"
+    const { service, calls } = makeService({
+      // The column was converted date -> timestamp after the recorded
+      // success; the retry must still render the original date literal.
+      catalogue: catalogue([
+        table("notes", {
+          columns: [
+            column("id", { isNullable: false, renderedType: "uuid" }),
+            column("due_on", {
+              renderedType: "timestamp without time zone",
+            }),
+          ],
+        }),
+      ]),
+      pool: recordPool({
+        [key]: seededOperationRecord(key, "schema.column.default.set", {
+          schema: APP_SCHEMA,
+          table: "notes",
+          column: "due_on",
+          default: { kind: "literal", value: "2026-01-01" },
+          type: "date",
+        }),
+      }),
+    })
+
+    await service.setColumnDefault({
+      idempotencyKey: key,
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "notes",
+      column: "due_on",
+      default: { kind: "literal", value: "2026-01-01" },
+    })
+    expect(calls).toHaveLength(1)
+    const call = calls[0]
+    expect(call?.options.command).toEqual({
+      schema: APP_SCHEMA,
+      table: "notes",
+      column: "due_on",
+      default: { kind: "literal", value: "2026-01-01" },
+      type: "date",
+    })
+    expect(
+      (call?.plan as { statements: readonly string[] }).statements,
+    ).toEqual([
+      'ALTER TABLE "app"."notes" ALTER COLUMN "due_on" SET DEFAULT \'2026-01-01\'::date',
+    ])
+  })
+
+  it("setColumnDefault replay never consults the catalogue", async () => {
+    const key = "default-replay-missing-table"
+    const { service, calls } = makeService({
+      // The table is gone from the catalogue; a key with a recorded row must
+      // still reach the executor instead of failing TABLE_NOT_FOUND.
+      catalogue: catalogue([]),
+      pool: recordPool({
+        [key]: seededOperationRecord(key, "schema.column.default.set", {
+          schema: APP_SCHEMA,
+          table: "notes",
+          column: "due_on",
+          default: { kind: "literal", value: "2026-01-01" },
+          type: "date",
+        }),
+      }),
+    })
+
+    await service.setColumnDefault({
+      idempotencyKey: key,
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "notes",
+      column: "due_on",
+      default: { kind: "literal", value: "2026-01-01" },
+    })
+    expect(calls).toHaveLength(1)
+  })
+
+  it("fails closed when the recorded command lacks the compiled type", async () => {
+    const key = "default-replay-malformed"
+    const { service, calls } = makeService({
+      catalogue: catalogue([table("notes")]),
+      pool: recordPool({
+        [key]: seededOperationRecord(key, "schema.column.default.set", {
+          schema: APP_SCHEMA,
+          table: "notes",
+          column: "title",
+          default: { kind: "literal", value: "untitled" },
+        }),
+      }),
+    })
+
+    const error = await rejection(
+      service.setColumnDefault({
+        idempotencyKey: key,
+        actor: "operator",
+        schema: APP_SCHEMA,
+        table: "notes",
+        column: "title",
+        default: { kind: "literal", value: "untitled" },
+      }),
+    )
+    expect(error).toMatchObject({ code: "INTERNAL_ERROR", status: 500 })
+    expect(calls).toHaveLength(0)
+  })
+})
+
+describe("dry-run always runs the preflight guards", () => {
+  const dropRecord = (key: string) => ({
+    id: "1",
+    idempotency_key: key,
+    command_type: "schema.table.drop",
+    command: { schema: APP_SCHEMA, table: "notes", confirmed: true },
+    checksum: "c".repeat(64),
+    status: "succeeded",
+    actor_fingerprint: "f".repeat(64),
+    error_code: null,
+    result: null,
+    created_at: new Date("2026-09-25T00:00:00.000Z"),
+    finished_at: new Date("2026-09-25T00:00:01.000Z"),
+  })
+
+  function keyPool(key: string): Pool {
+    return {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.includes("FROM microjbase.schema_operations")) {
+          return {
+            rows: values?.[0] === key ? [dropRecord(key)] : [],
+          } as never
+        }
+        throw new Error(`unexpected preflight query: ${text}`)
+      },
+    } as unknown as Pool
+  }
+
+  it("dropTable refuses an exposed table with a wrong confirmation on a reused dry-run key", async () => {
+    const key = "dry-drop-exposed"
+    const { service, calls } = makeService({
+      catalogue: catalogue([table("notes")]),
+      registry: exposedRegistry(APP_SCHEMA, "notes"),
+      pool: keyPool(key),
+    })
+
+    const error = await rejection(
+      service.dropTable({
+        idempotencyKey: key,
+        actor: "operator",
+        schema: APP_SCHEMA,
+        table: "notes",
+        confirm: "nope",
+        dryRun: true,
+      }),
+    )
+    expect(error).toMatchObject({ code: "VALIDATION_ERROR", status: 400 })
+    expect(calls).toHaveLength(0)
+  })
+
+  it("dropTable refuses a wrong confirmation on a reused dry-run key", async () => {
+    const key = "dry-drop-confirm"
+    const { service, calls } = makeService({
+      catalogue: catalogue([table("notes")]),
+      pool: keyPool(key),
+    })
+
+    const error = await rejection(
+      service.dropTable({
+        idempotencyKey: key,
+        actor: "operator",
+        schema: APP_SCHEMA,
+        table: "notes",
+        confirm: "nope",
+        dryRun: true,
+      }),
+    )
+    expect(error).toMatchObject({ code: "VALIDATION_ERROR", status: 400 })
+    expect(calls).toHaveLength(0)
+  })
+
+  it("dropColumn refuses an exposed table with a wrong confirmation on a reused dry-run key", async () => {
+    const key = "dry-dropcolumn-exposed"
+    const { service, calls } = makeService({
+      catalogue: catalogue([table("notes")]),
+      registry: exposedRegistry(APP_SCHEMA, "notes"),
+      pool: keyPool(key),
+    })
+
+    const error = await rejection(
+      service.dropColumn({
+        idempotencyKey: key,
+        actor: "operator",
+        schema: APP_SCHEMA,
+        table: "notes",
+        column: "title",
+        confirm: "nope",
+        dryRun: true,
+      }),
+    )
+    expect(error).toMatchObject({ code: "VALIDATION_ERROR", status: 400 })
     expect(calls).toHaveLength(0)
   })
 })
