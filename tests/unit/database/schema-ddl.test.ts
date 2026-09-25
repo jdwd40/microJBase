@@ -8,11 +8,17 @@ import {
   MIGRATION_LOCK_KEY_FOR_DISTINCTION,
   SCHEMA_DDL_LOCK_KEY,
   compileCreateTable,
+  computeOperationChecksum,
   createSchemaDdlExecutor,
+  createSchemaOperationLog,
   describePlan,
   translateDdlError,
 } from "../../../src/database/index.js"
-import type { SchemaOperationLog } from "../../../src/database/index.js"
+import type {
+  SchemaOperationLog,
+  SchemaOperationRecord,
+} from "../../../src/database/index.js"
+import type { JsonValue } from "../../../src/contracts/index.js"
 
 const BASE_SPEC = {
   schema: "app",
@@ -45,7 +51,9 @@ describe("compileCreateTable", () => {
     expect(plan.statements).toHaveLength(1)
     const statement = plan.statements[0] ?? ""
     expect(statement).toContain('CREATE TABLE "app"."notes"')
-    expect(statement).toContain('"id" uuid NOT NULL DEFAULT gen_random_uuid()')
+    expect(statement).toContain(
+      '"id" uuid NOT NULL DEFAULT pg_catalog.gen_random_uuid()',
+    )
     expect(statement).toContain('"title" text NOT NULL')
     expect(statement).toContain(
       '"created_at" timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP',
@@ -92,6 +100,147 @@ describe("compileCreateTable", () => {
         }),
       ).toThrow("Internal schemas cannot be modified")
     }
+  })
+
+  it("refuses internal schemas case-insensitively", () => {
+    for (const schema of [
+      "PG_catalog",
+      "MICROJBASE",
+      "Information_schema",
+      "PG_Temp",
+    ]) {
+      expect(() =>
+        compileCreateTable({
+          schema,
+          table: "notes",
+          columns: [
+            {
+              name: "id",
+              type: "uuid",
+              nullable: false,
+              default: { kind: "none" },
+            },
+          ],
+        }),
+      ).toThrow("Internal schemas cannot be modified")
+    }
+  })
+
+  it("rejects inherited object properties as column types", () => {
+    expect(() =>
+      compileCreateTable({
+        schema: "app",
+        table: "notes",
+        columns: [
+          {
+            name: "payload",
+            type: "toString" as never,
+            nullable: true,
+            default: { kind: "none" },
+          },
+        ],
+      }),
+    ).toThrow("is not allowlisted")
+  })
+
+  it("enforces the int4 range for integer literal defaults", () => {
+    const withInteger = (value: number) =>
+      compileCreateTable({
+        schema: "app",
+        table: "metrics",
+        columns: [
+          {
+            name: "n",
+            type: "integer",
+            nullable: true,
+            default: { kind: "literal", value },
+          },
+        ],
+      })
+    expect(withInteger(2_147_483_647).statements[0]).toContain(
+      "DEFAULT 2147483647",
+    )
+    expect(() => withInteger(2_147_483_648)).toThrow("int4")
+    expect(() => withInteger(-2_147_483_649)).toThrow("int4")
+    // Integer-valued but outside the safe-integer range.
+    expect(() => withInteger(1e21)).toThrow("int4")
+  })
+
+  it("enforces safe integers and the int8 range for bigint defaults", () => {
+    const withBigint = (value: number) =>
+      compileCreateTable({
+        schema: "app",
+        table: "metrics",
+        columns: [
+          {
+            name: "n",
+            type: "bigint",
+            nullable: true,
+            default: { kind: "literal", value },
+          },
+        ],
+      })
+    expect(withBigint(9_007_199_254_740_991).statements[0]).toContain(
+      "DEFAULT 9007199254740991",
+    )
+    // 2 ** 63 is integer-valued but outside the safe-integer range, so it
+    // cannot be an exact bigint default.
+    expect(() => withBigint(2 ** 63)).toThrow("int8")
+    expect(() => withBigint(1e21)).toThrow("int8")
+  })
+
+  it("renders numeric defaults without an exponent", () => {
+    const withNumeric = (value: number) =>
+      compileCreateTable({
+        schema: "app",
+        table: "metrics",
+        columns: [
+          {
+            name: "n",
+            type: "numeric",
+            nullable: true,
+            default: { kind: "literal", value },
+          },
+        ],
+      }).statements[0]
+    expect(withNumeric(1e21)).toContain("DEFAULT 1000000000000000000000")
+    expect(withNumeric(1e21)).not.toContain("1e+21")
+    expect(withNumeric(3.14)).toContain("DEFAULT 3.14")
+    expect(withNumeric(1.5e-7)).toContain("DEFAULT 0.00000015")
+  })
+
+  it("rejects NUL and backslash characters in text literal defaults", () => {
+    const withText = (value: string) =>
+      compileCreateTable({
+        schema: "app",
+        table: "notes",
+        columns: [
+          {
+            name: "title",
+            type: "text",
+            nullable: true,
+            default: { kind: "literal", value },
+          },
+        ],
+      })
+    expect(() => withText("back\\slash")).toThrow("backslash")
+    expect(() => withText("nul\0byte")).toThrow("NUL")
+  })
+
+  it("qualifies the random uuid default with pg_catalog", () => {
+    const plan = compileCreateTable({
+      schema: "app",
+      table: "notes",
+      columns: [
+        {
+          name: "id",
+          type: "uuid",
+          nullable: false,
+          default: { kind: "random_uuid" },
+        },
+      ],
+    })
+    expect(plan.statements[0]).toContain("DEFAULT pg_catalog.gen_random_uuid()")
   })
 
   it("rejects non-allowlisted column types", () => {
@@ -392,15 +541,27 @@ describe("translateDdlError", () => {
   })
 })
 
-// A scripted pool/client pair for executor behaviour tests.
+// A scripted pool/client pair for executor behaviour tests. Every submitted
+// query is recorded together with the protocol mode it was submitted with so
+// tests can assert the extended protocol is used for plan statements.
 function createScriptedPool(script: {
   failWith?: unknown
   failAtStatement?: number
+  throwOn?: (text: string) => unknown
 }) {
   const calls: string[] = []
+  const modes: Array<string | undefined> = []
   const client = {
-    query: async (text: string) => {
+    query: async (input: string | { text: string; queryMode?: string }) => {
+      const text = typeof input === "string" ? input : input.text
       calls.push(text)
+      modes.push(typeof input === "string" ? undefined : input.queryMode)
+      if (script.throwOn !== undefined) {
+        const thrown = script.throwOn(text)
+        if (thrown !== undefined) {
+          throw thrown
+        }
+      }
       if (
         script.failWith !== undefined &&
         calls.filter((c) => c.startsWith("CREATE TABLE")).length ===
@@ -422,73 +583,119 @@ function createScriptedPool(script: {
       await this.close()
     },
   }
-  return { pool, calls }
+  return { pool, calls, modes }
 }
 
-function createFakeLog(behaviour: {
-  outcome?:
-    | { kind: "accepted"; id: number }
-    | { kind: "replay"; id: number }
-    | { kind: "in_progress"; id: number }
-  failThrows?: boolean
-}) {
+type TrackingEntry = {
+  id: number
+  checksum: string
+  status: "running" | "succeeded" | "failed"
+}
+
+function fakeRecord(
+  entry: TrackingEntry,
+  result: JsonValue | null = null,
+): SchemaOperationRecord {
+  return {
+    id: entry.id,
+    idempotencyKey: "key-1",
+    commandType: "schema.table.create",
+    command: {},
+    checksum: entry.checksum,
+    status: entry.status,
+    actorFingerprint: "x",
+    errorCode: null,
+    result,
+    createdAt: new Date(),
+    finishedAt: entry.status === "running" ? null : new Date(),
+  }
+}
+
+// An in-memory operation log honouring the repository replay contract,
+// including the statement-list-aware checksum the executor supplies. The
+// executor binds the log to its transaction client, so no SQL reaches the
+// scripted pool from here.
+function createTrackingLog(options: { succeedThrows?: boolean } = {}) {
+  const entries = new Map<string, TrackingEntry>()
+  let nextId = 1
+
+  const fail = vi.fn(async (id: number) => {
+    const entry = [...entries.values()].find((candidate) => candidate.id === id)
+    if (entry === undefined || entry.status !== "running") {
+      throw new AppError("INTERNAL_ERROR", "operation is not running", 500)
+    }
+    entry.status = "failed"
+    return fakeRecord(entry)
+  })
+
   const log: SchemaOperationLog = {
-    begin: async () => {
-      const kind = behaviour.outcome?.kind ?? "accepted"
-      const record = {
-        id: behaviour.outcome?.id ?? 1,
-        idempotencyKey: "key",
-        commandType: "schema.table.create",
-        command: {},
-        checksum: "x",
-        status:
-          kind === "replay" ? ("succeeded" as const) : ("running" as const),
-        actorFingerprint: "x",
-        errorCode: null,
-        result: kind === "replay" ? { statementCount: 1 } : null,
-        createdAt: new Date(),
-        finishedAt: kind === "replay" ? new Date() : null,
-      }
-      if (kind === "accepted") {
-        return { kind: "accepted" as const, record, retryOfFailure: false }
-      }
-      return { kind, record } as never
-    },
-    succeed: async (id: number) => ({
-      id,
-      idempotencyKey: "key",
-      commandType: "schema.table.create",
-      command: {},
-      checksum: "x",
-      status: "succeeded" as const,
-      actorFingerprint: "x",
-      errorCode: null,
-      result: null,
-      createdAt: new Date(),
-      finishedAt: new Date(),
-    }),
-    fail: behaviour.failThrows
-      ? async () => {
-          throw new Error("log unavailable")
+    async begin(input) {
+      const checksum = computeOperationChecksum(
+        input.commandType,
+        input.command,
+        input.statements,
+      )
+      const existing = entries.get(input.idempotencyKey)
+      if (existing === undefined) {
+        const entry: TrackingEntry = {
+          id: nextId++,
+          checksum,
+          status: "running",
         }
-      : async (id: number) => ({
-          id,
-          idempotencyKey: "key",
-          commandType: "schema.table.create",
-          command: {},
-          checksum: "x",
-          status: "failed" as const,
-          actorFingerprint: "x",
-          errorCode: "CONFLICT",
-          result: null,
-          createdAt: new Date(),
-          finishedAt: new Date(),
-        }),
+        entries.set(input.idempotencyKey, entry)
+        return {
+          kind: "accepted",
+          record: fakeRecord(entry),
+          retryOfFailure: false,
+        }
+      }
+      if (existing.checksum !== checksum) {
+        throw new AppError(
+          "CONFLICT",
+          "Idempotency key was already used with a different operation",
+          409,
+        )
+      }
+      if (existing.status === "succeeded") {
+        return {
+          kind: "replay",
+          record: fakeRecord(existing, { statementCount: 1 }),
+        }
+      }
+      if (existing.status === "running") {
+        return { kind: "in_progress", record: fakeRecord(existing) }
+      }
+      existing.status = "running"
+      return {
+        kind: "accepted",
+        record: fakeRecord(existing),
+        retryOfFailure: true,
+      }
+    },
+    succeed:
+      options.succeedThrows === true
+        ? vi.fn(async () => {
+            throw new Error("log unavailable")
+          })
+        : vi.fn(async (id: number, result: JsonValue) => {
+            const entry = [...entries.values()].find(
+              (candidate) => candidate.id === id,
+            )
+            if (entry === undefined || entry.status !== "running") {
+              throw new AppError(
+                "INTERNAL_ERROR",
+                "operation is not running",
+                500,
+              )
+            }
+            entry.status = "succeeded"
+            return fakeRecord(entry, result)
+          }),
+    fail,
     get: async () => null,
     list: async () => [],
   }
-  const failSpy = vi.spyOn(log, "fail")
-  return { log, failSpy }
+  return { log, fail }
 }
 
 const EXEC_OPTIONS = {
@@ -501,11 +708,11 @@ const EXEC_OPTIONS = {
 describe("createSchemaDdlExecutor", () => {
   it("dry-run executes under the advisory lock and always rolls back", async () => {
     const { pool, calls } = createScriptedPool({})
-    const { log } = createFakeLog({})
+    const { log } = createTrackingLog()
     const loggerLines: string[] = []
     const executor = createSchemaDdlExecutor({
       pool: pool as never,
-      operationLog: log,
+      createOperationLog: () => log,
       logger: {
         error: () => undefined,
         warn: () => undefined,
@@ -525,7 +732,8 @@ describe("createSchemaDdlExecutor", () => {
       record: null,
     })
     expect(calls[0]).toBe("BEGIN")
-    expect(calls[1]).toContain("pg_advisory_xact_lock")
+    expect(calls[1]).toContain("set_config")
+    expect(calls[2]).toContain("pg_advisory_xact_lock")
     expect(calls.at(-2)).toBe("ROLLBACK")
     expect(calls).not.toContain("COMMIT")
     expect(
@@ -537,10 +745,10 @@ describe("createSchemaDdlExecutor", () => {
     const { pool } = createScriptedPool({
       failWith: { code: "42P07", message: 'relation "notes" already exists' },
     })
-    const { log } = createFakeLog({})
+    const { log } = createTrackingLog()
     const executor = createSchemaDdlExecutor({
       pool: pool as never,
-      operationLog: log,
+      createOperationLog: () => log,
     })
 
     await expect(
@@ -553,10 +761,10 @@ describe("createSchemaDdlExecutor", () => {
 
   it("accepted begin runs statements in order inside one transaction", async () => {
     const { pool, calls } = createScriptedPool({})
-    const { log } = createFakeLog({ outcome: { kind: "accepted", id: 7 } })
+    const { log } = createTrackingLog()
     const executor = createSchemaDdlExecutor({
       pool: pool as never,
-      operationLog: log,
+      createOperationLog: () => log,
     })
 
     const outcome = await executor.execute(
@@ -567,18 +775,20 @@ describe("createSchemaDdlExecutor", () => {
     expect(outcome.replayed).toBe(false)
     expect(outcome.record?.status).toBe("succeeded")
     expect(calls[0]).toBe("BEGIN")
-    expect(calls[1]).toContain("pg_advisory_xact_lock")
-    expect(calls[2]).toContain("CREATE TABLE")
+    expect(calls[1]).toContain("set_config")
+    expect(calls[2]).toContain("pg_advisory_xact_lock")
+    expect(calls[3]).toContain("CREATE TABLE")
     expect(calls.at(-2)).toBe("COMMIT")
   })
 
   it("replay begin executes nothing", async () => {
     const { pool, calls } = createScriptedPool({})
-    const { log } = createFakeLog({ outcome: { kind: "replay", id: 9 } })
+    const { log } = createTrackingLog()
     const executor = createSchemaDdlExecutor({
       pool: pool as never,
-      operationLog: log,
+      createOperationLog: () => log,
     })
+    await executor.execute(compileCreateTable(BASE_SPEC), EXEC_OPTIONS)
 
     const outcome = await executor.execute(
       compileCreateTable(BASE_SPEC),
@@ -586,37 +796,182 @@ describe("createSchemaDdlExecutor", () => {
     )
 
     expect(outcome.replayed).toBe(true)
-    expect(calls).toHaveLength(0)
+    expect(calls.filter((c) => c === "COMMIT")).toHaveLength(1)
   })
 
   it("in_progress begin refuses with CONFLICT", async () => {
     const { pool, calls } = createScriptedPool({})
-    const { log } = createFakeLog({ outcome: { kind: "in_progress", id: 3 } })
+    const { log } = createTrackingLog()
     const executor = createSchemaDdlExecutor({
       pool: pool as never,
-      operationLog: log,
+      createOperationLog: () => log,
+    })
+    await executor.execute(compileCreateTable(BASE_SPEC), EXEC_OPTIONS)
+    // The tracking log still holds the key in 'running': emulate a stuck
+    // legacy row by refusing the restart through a fresh in-progress state.
+    const stuckLog: SchemaOperationLog = {
+      begin: async () => {
+        const record = fakeRecord({ id: 1, checksum: "x", status: "running" })
+        return { kind: "in_progress", record }
+      },
+      succeed: async () => {
+        throw new Error("unreachable")
+      },
+      fail: async () => {
+        throw new Error("unreachable")
+      },
+      get: async () => null,
+      list: async () => [],
+    }
+    const stuckExecutor = createSchemaDdlExecutor({
+      pool: pool as never,
+      createOperationLog: () => stuckLog,
+    })
+
+    await expect(
+      stuckExecutor.execute(compileCreateTable(BASE_SPEC), EXEC_OPTIONS),
+    ).rejects.toMatchObject({ code: "CONFLICT", status: 409 })
+    expect(calls.filter((c) => c === "COMMIT")).toHaveLength(1)
+  })
+
+  it("rejects a hand-built plan that did not come from the compiler", async () => {
+    const { pool, calls } = createScriptedPool({})
+    const { log } = createTrackingLog()
+    const executor = createSchemaDdlExecutor({
+      pool: pool as never,
+      createOperationLog: () => log,
+    })
+    const forged = {
+      statements: ['CREATE TABLE "app"."forged" ("id" uuid)'],
+      description: "forged plan",
+    }
+
+    await expect(
+      executor.execute(forged as never, EXEC_OPTIONS),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR", status: 400 })
+    expect(calls).toHaveLength(0)
+  })
+
+  it("rejects a hand-built plan during dry-run before touching the database", async () => {
+    const { pool, calls } = createScriptedPool({})
+    const { log } = createTrackingLog()
+    const executor = createSchemaDdlExecutor({
+      pool: pool as never,
+      createOperationLog: () => log,
+    })
+    const forged = {
+      statements: ['CREATE TABLE "app"."forged" ("id" uuid)'],
+      description: "forged plan",
+    }
+
+    await expect(
+      executor.execute(forged as never, { ...EXEC_OPTIONS, dryRun: true }),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR", status: 400 })
+    expect(calls).toHaveLength(0)
+  })
+
+  it("submits every plan statement with the extended query protocol", async () => {
+    const { pool, calls, modes } = createScriptedPool({})
+    const { log } = createTrackingLog()
+    const executor = createSchemaDdlExecutor({
+      pool: pool as never,
+      createOperationLog: () => log,
+    })
+
+    await executor.execute(compileCreateTable(BASE_SPEC), EXEC_OPTIONS)
+
+    const createIndexes = calls
+      .map((text, index) => (text.startsWith("CREATE TABLE") ? index : -1))
+      .filter((index) => index >= 0)
+    expect(createIndexes).toHaveLength(1)
+    for (const index of createIndexes) {
+      expect(modes[index]).toBe("extended")
+    }
+  })
+
+  it("conflicts when a succeeded key replays with a different statement list", async () => {
+    const { pool } = createScriptedPool({})
+    const { log } = createTrackingLog()
+    const executor = createSchemaDdlExecutor({
+      pool: pool as never,
+      createOperationLog: () => log,
+    })
+    const firstSpec = { ...BASE_SPEC, table: "one" }
+    const secondSpec = { ...BASE_SPEC, table: "two" }
+
+    await executor.execute(compileCreateTable(firstSpec), EXEC_OPTIONS)
+    await expect(
+      executor.execute(compileCreateTable(secondSpec), EXEC_OPTIONS),
+    ).rejects.toMatchObject({ code: "CONFLICT", status: 409 })
+  })
+
+  it("rolls back the DDL and the history row when the success update fails", async () => {
+    const { pool, calls } = createScriptedPool({})
+    const { log, fail } = createTrackingLog({ succeedThrows: true })
+    const executor = createSchemaDdlExecutor({
+      pool: pool as never,
+      createOperationLog: () => log,
+    })
+
+    await expect(
+      executor.execute(compileCreateTable(BASE_SPEC), EXEC_OPTIONS),
+    ).rejects.toMatchObject({ code: "INTERNAL_ERROR", status: 500 })
+    expect(calls).toContain("ROLLBACK")
+    expect(calls).not.toContain("COMMIT")
+    expect(fail).not.toHaveBeenCalled()
+  })
+
+  it("maps lock_timeout (55P03) while waiting on the advisory key to the in-progress conflict", async () => {
+    const { pool, calls } = createScriptedPool({
+      throwOn: (text) =>
+        text.includes("pg_advisory_xact_lock")
+          ? { code: "55P03", message: "lock not available" }
+          : undefined,
+    })
+    const { log } = createTrackingLog()
+    const executor = createSchemaDdlExecutor({
+      pool: pool as never,
+      createOperationLog: () => log,
     })
 
     await expect(
       executor.execute(compileCreateTable(BASE_SPEC), EXEC_OPTIONS),
     ).rejects.toMatchObject({ code: "CONFLICT", status: 409 })
-    expect(calls).toHaveLength(0)
+    expect(calls).toContain("ROLLBACK")
+    expect(calls).not.toContain("COMMIT")
   })
 
-  it("failure records the failure and rethrows a redacted error", async () => {
+  it("maps the statement timeout while waiting on the idempotency key to the in-progress conflict", async () => {
+    const { pool, calls } = createScriptedPool({
+      throwOn: (text) =>
+        text.includes("INSERT INTO microjbase.schema_operations")
+          ? new Error("Query read timeout")
+          : undefined,
+    })
+    const executor = createSchemaDdlExecutor({
+      pool: pool as never,
+      createOperationLog: (query) => createSchemaOperationLog({ query }),
+    })
+
+    await expect(
+      executor.execute(compileCreateTable(BASE_SPEC), EXEC_OPTIONS),
+    ).rejects.toMatchObject({ code: "CONFLICT", status: 409 })
+    expect(calls).toContain("ROLLBACK")
+    expect(calls).not.toContain("COMMIT")
+  })
+
+  it("failure rolls back the DDL and rethrows a redacted error", async () => {
     const { pool } = createScriptedPool({
       failWith: {
         code: "42501",
         message: 'permission denied for table "super_secret_table"',
       },
     })
-    const { log, failSpy } = createFakeLog({
-      outcome: { kind: "accepted", id: 4 },
-    })
+    const { log, fail } = createTrackingLog()
     const loggerLines: string[] = []
     const executor = createSchemaDdlExecutor({
       pool: pool as never,
-      operationLog: log,
+      createOperationLog: () => log,
       logger: {
         error: () => undefined,
         warn: (line: string) => loggerLines.push(line),
@@ -628,7 +983,8 @@ describe("createSchemaDdlExecutor", () => {
     await expect(
       executor.execute(compileCreateTable(BASE_SPEC), EXEC_OPTIONS),
     ).rejects.toMatchObject({ code: "INTERNAL_ERROR", status: 500 })
-    expect(failSpy).toHaveBeenCalledWith(4, "INTERNAL_ERROR")
+    // The single-transaction design rolls the history row back with the DDL.
+    expect(fail).not.toHaveBeenCalled()
 
     // Log redaction: no statement text, no database error text, no secrets.
     const logged = loggerLines.join("\n")
@@ -640,11 +996,11 @@ describe("createSchemaDdlExecutor", () => {
 
   it("logs executed operations without statement text or values", async () => {
     const { pool } = createScriptedPool({})
-    const { log } = createFakeLog({ outcome: { kind: "accepted", id: 1 } })
+    const { log } = createTrackingLog()
     const loggerLines: string[] = []
     const executor = createSchemaDdlExecutor({
       pool: pool as never,
-      operationLog: log,
+      createOperationLog: () => log,
       logger: {
         error: () => undefined,
         warn: () => undefined,
@@ -662,10 +1018,10 @@ describe("createSchemaDdlExecutor", () => {
 
   it("supports multiple plans in one transaction", async () => {
     const { pool, calls } = createScriptedPool({})
-    const { log } = createFakeLog({ outcome: { kind: "accepted", id: 1 } })
+    const { log } = createTrackingLog()
     const executor = createSchemaDdlExecutor({
       pool: pool as never,
-      operationLog: log,
+      createOperationLog: () => log,
     })
 
     const first = compileCreateTable({
@@ -705,10 +1061,10 @@ describe("createSchemaDdlExecutor", () => {
       failWith: { code: "42P07", message: "relation exists" },
       failAtStatement: 2,
     })
-    const { log } = createFakeLog({ outcome: { kind: "accepted", id: 1 } })
+    const { log } = createTrackingLog()
     const executor = createSchemaDdlExecutor({
       pool: pool as never,
-      operationLog: log,
+      createOperationLog: () => log,
     })
 
     const first = compileCreateTable({

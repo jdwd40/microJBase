@@ -63,12 +63,14 @@ export {
 } from "./schema-snapshot.js"
 export {
   SCHEMA_ADMIN_MAX_CONNECTIONS,
+  assertSchemaAdminSessionDistinct,
   checkSchemaAdminRoleSafety,
   createSchemaAdminPool,
   type SchemaAdminPoolConfig,
   type SchemaAdminRoleSafety,
 } from "./schema-admin-pool.js"
 export {
+  checkSchemaOperationLogWriteAccess,
   computeActorFingerprint,
   computeOperationChecksum,
   createSchemaOperationLog,
@@ -96,6 +98,7 @@ export {
   type ExecuteOutcome,
   type SchemaDdlExecutor,
   type SchemaDdlExecutorDependencies,
+  type SchemaOperationLogQuery,
 } from "./schema-ddl.js"
 export {
   type ColumnMetadata,

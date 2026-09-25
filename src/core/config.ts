@@ -163,12 +163,59 @@ function assertSchemaAdminConfigPairing(
 
 // The schema-admin lane must never share the runtime data connection surface
 // (D-011). It may share a role with the migration lane, but never with the
-// restricted runtime lane.
+// restricted runtime lane. Comparing raw URL strings misses equivalent
+// spellings of the same surface (postgres:// vs postgresql://, localhost vs
+// 127.0.0.1, default ports, query parameters), so the comparison normalizes
+// the scheme-independent parts and ignores credentials, query, and fragment.
+// The live-session check at startup (assertSchemaAdminSessionDistinct) is the
+// second layer for aliases a URL cannot reveal.
+function normalizePostgresUrl(raw: string): {
+  username: string
+  host: string
+  port: number
+  database: string
+} | null {
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return null
+  }
+  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+    return null
+  }
+  let host = parsed.hostname.toLowerCase()
+  if (host === "localhost" || host === "::1" || host === "[::1]") {
+    host = "127.0.0.1"
+  }
+  const port = parsed.port === "" ? 5432 : Number(parsed.port)
+  const database = parsed.pathname.replace(/^\//, "")
+  return {
+    username: decodeURIComponent(parsed.username),
+    host,
+    port,
+    database,
+  }
+}
+
 function assertSchemaAdminUrlDistinct(
   databaseUrl: string,
   schemaDatabaseUrl: string | null,
 ): void {
-  if (schemaDatabaseUrl !== null && schemaDatabaseUrl === databaseUrl) {
+  if (schemaDatabaseUrl === null) {
+    return
+  }
+  const normalizedRuntime = normalizePostgresUrl(databaseUrl)
+  const normalizedAdmin = normalizePostgresUrl(schemaDatabaseUrl)
+  const sameSurface =
+    schemaDatabaseUrl === databaseUrl ||
+    (normalizedRuntime !== null &&
+      normalizedAdmin !== null &&
+      normalizedRuntime.username === normalizedAdmin.username &&
+      normalizedRuntime.host === normalizedAdmin.host &&
+      normalizedRuntime.port === normalizedAdmin.port &&
+      normalizedRuntime.database === normalizedAdmin.database)
+  if (sameSurface) {
     throw new AppError(
       "VALIDATION_ERROR",
       "SCHEMA_DATABASE_URL must not equal DATABASE_URL (the runtime data role)",

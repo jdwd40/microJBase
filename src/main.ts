@@ -21,10 +21,12 @@ import {
 import { createAuthService } from "./auth/index.js"
 import { createDataService } from "./data/index.js"
 import {
+  assertSchemaAdminSessionDistinct,
   checkApplicablePolicies,
   checkRuntimeRoleSafety,
   checkRuntimeTablePrivileges,
   checkSchemaAdminRoleSafety,
+  checkSchemaOperationLogWriteAccess,
   checkTableOwnershipAndRls,
   createAuthRepository,
   createPool,
@@ -73,6 +75,8 @@ export async function start(): Promise<StartedServer> {
     await assertExposedTableSafety(pool, config.tables)
     if (adminPool) {
       await assertSchemaAdminRoleSafety(adminPool)
+      await assertSchemaAdminHistoryWriteAccess(adminPool)
+      await assertSchemaAdminLaneDistinctness(pool, adminPool)
     }
 
     const registry = await buildTableRegistry(
@@ -160,6 +164,37 @@ async function assertSchemaAdminRoleSafety(pool: Pool): Promise<void> {
     await checkSchemaAdminRoleSafety(client)
   } finally {
     client.release()
+  }
+}
+
+// Migration 0005 cannot grant history access to a role that does not exist
+// yet, so the operator grants it out of band; probe here and fail startup
+// with a clear message rather than letting the first operation die.
+async function assertSchemaAdminHistoryWriteAccess(pool: Pool): Promise<void> {
+  const client = await pool.connect()
+  try {
+    await checkSchemaOperationLogWriteAccess(client)
+  } finally {
+    client.release()
+  }
+}
+
+// URL-text comparison happens in parseConfig; this is the second layer that
+// catches host aliases and role mappings only the live sessions reveal.
+async function assertSchemaAdminLaneDistinctness(
+  runtimePool: Pool,
+  adminPool: Pool,
+): Promise<void> {
+  const runtimeClient = await runtimePool.connect()
+  try {
+    const adminClient = await adminPool.connect()
+    try {
+      await assertSchemaAdminSessionDistinct(runtimeClient, adminClient)
+    } finally {
+      adminClient.release()
+    }
+  } finally {
+    runtimeClient.release()
   }
 }
 

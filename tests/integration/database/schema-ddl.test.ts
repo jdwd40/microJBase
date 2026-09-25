@@ -150,13 +150,10 @@ beforeAll(async () => {
   })
 
   adminPool = createPool({ databaseUrl: adminRoleUrl(), maxConnections: 5 })
-  const operationLog = createSchemaOperationLog({
-    query: (text, values) => adminPool.query(text, values),
-  })
   logSink = []
   executor = createSchemaDdlExecutor({
     pool: adminPool,
-    operationLog,
+    createOperationLog: (query) => createSchemaOperationLog({ query }),
     logger: {
       error: () => undefined,
       warn: (line: string) => logSink.push(line),
@@ -288,7 +285,7 @@ describe("schema DDL executor against real PostgreSQL", () => {
     ).rejects.toMatchObject({ code: "CONFLICT", status: 409 })
   })
 
-  it("maps duplicate_table to a safe CONFLICT and records the failure", async () => {
+  it("maps duplicate_table to a safe CONFLICT and leaves no history row", async () => {
     logSink.length = 0
     await expect(
       executor.execute(compileCreateTable(notesSpec("real_notes")), {
@@ -303,9 +300,9 @@ describe("schema DDL executor against real PostgreSQL", () => {
       message: "Relation already exists",
     })
 
-    const history = await historyRow("v0206-dup-1")
-    expect(history?.status).toBe("failed")
-    expect(history?.error_code).toBe("CONFLICT")
+    // The row and the DDL commit or roll back together: a failed attempt
+    // leaves no running row behind for retries to wedge on.
+    expect(await historyRow("v0206-dup-1")).toBeNull()
   })
 
   it("maps a missing schema to TABLE_NOT_FOUND without leaking internals", async () => {
@@ -408,8 +405,10 @@ describe("schema DDL executor against real PostgreSQL", () => {
 
     const keys = ["v0206-race-a", "v0206-race-b"] as const
     const statuses = await Promise.all(keys.map((key) => historyRow(key)))
-    const kinds = statuses.map((row) => row?.status).sort()
-    expect(kinds).toEqual(["failed", "succeeded"])
+    const kinds = statuses.map((row) => row?.status ?? null).sort()
+    // The loser's DDL and history row rolled back together; only the winner
+    // has a durable succeeded record.
+    expect(kinds).toEqual([null, "succeeded"])
   })
 
   it("rolls back every statement when a later statement in the transaction fails", async () => {
@@ -423,9 +422,149 @@ describe("schema DDL executor against real PostgreSQL", () => {
       }),
     ).rejects.toMatchObject({ code: "CONFLICT" })
     expect(await tableExists(APP_SCHEMA, "rollback_notes")).toBe(false)
-    const history = await historyRow("v0206-rollback-1")
-    expect(history?.status).toBe("failed")
+    // No durable row remains: the history insert shared the DDL transaction.
+    expect(await historyRow("v0206-rollback-1")).toBeNull()
   })
+
+  it("rejects a hand-built plan that did not come from the compiler", async () => {
+    const forged = {
+      statements: [
+        `CREATE TABLE ${quoteIdentifier(APP_SCHEMA)}.${quoteIdentifier("forged_notes")} ("id" uuid)`,
+      ],
+      description: "forged plan",
+    }
+    await expect(
+      executor.execute(forged as never, {
+        idempotencyKey: "v0206-forged-1",
+        commandType: "schema.table.create",
+        command: { schema: APP_SCHEMA, table: "forged_notes" },
+        actor: "operator",
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR", status: 400 })
+    expect(await tableExists(APP_SCHEMA, "forged_notes")).toBe(false)
+    expect(await historyRow("v0206-forged-1")).toBeNull()
+  })
+
+  it("a statement cannot chain a second command through the extended protocol", async () => {
+    // The compiler seals every statement; a hostile literal value stays
+    // inside its quoted default and the extended protocol refuses to run a
+    // second command from one statement string.
+    const hostile = "x'); DROP TABLE " + APP_SCHEMA + ".real_notes; --"
+    await executor.execute(
+      compileCreateTable({
+        schema: APP_SCHEMA,
+        table: "chained_notes",
+        columns: [
+          {
+            name: "title",
+            type: "text",
+            nullable: false,
+            default: { kind: "literal", value: hostile },
+          },
+        ],
+      }),
+      {
+        idempotencyKey: "v0206-chain-1",
+        commandType: "schema.table.create",
+        command: { schema: APP_SCHEMA, table: "chained_notes" },
+        actor: "operator",
+      },
+    )
+    expect(await tableExists(APP_SCHEMA, "chained_notes")).toBe(true)
+    expect(await tableExists(APP_SCHEMA, "real_notes")).toBe(true)
+  })
+
+  it("literal quoting stays safe when the admin role sets standard_conforming_strings=off", async () => {
+    // Reproduces the R2 breakout scenario with the fix applied: the role
+    // defaults to standard_conforming_strings=off, and the executor must
+    // still execute exactly one command per statement.
+    await withClient(adminDatabaseUrl as string, async (admin) => {
+      await admin.query(
+        `ALTER ROLE ${quoteIdentifier(ADMIN_ROLE)} SET standard_conforming_strings = off`,
+      )
+    })
+    const hardenedPool = createPool({
+      databaseUrl: adminRoleUrl(),
+      maxConnections: 3,
+    })
+    try {
+      const hardenedExecutor = createSchemaDdlExecutor({
+        pool: hardenedPool,
+        createOperationLog: (query) => createSchemaOperationLog({ query }),
+      })
+      await expect(
+        hardenedExecutor.execute(
+          compileCreateTable(notesSpec("scs_off_notes")),
+          {
+            idempotencyKey: "v0206-scs-off-1",
+            commandType: "schema.table.create",
+            command: { schema: APP_SCHEMA, table: "scs_off_notes" },
+            actor: "operator",
+          },
+        ),
+      ).resolves.toMatchObject({ replayed: false })
+      expect(await tableExists(APP_SCHEMA, "scs_off_notes")).toBe(true)
+      expect(await tableExists(APP_SCHEMA, "real_notes")).toBe(true)
+      const history = await historyRow("v0206-scs-off-1")
+      expect(history?.status).toBe("succeeded")
+    } finally {
+      await hardenedPool.close()
+      await withClient(adminDatabaseUrl as string, async (admin) => {
+        await admin.query(
+          `ALTER ROLE ${quoteIdentifier(ADMIN_ROLE)} RESET standard_conforming_strings`,
+        )
+      })
+    }
+  })
+
+  it("maps lock_timeout while waiting on the advisory key to the in-progress conflict", async () => {
+    await withClient(adminDatabaseUrl as string, async (admin) => {
+      await admin.query(
+        `ALTER ROLE ${quoteIdentifier(ADMIN_ROLE)} SET lock_timeout = '800ms'`,
+      )
+    })
+    const impatientPool = createPool({
+      databaseUrl: adminRoleUrl(),
+      maxConnections: 3,
+    })
+    const pg = await import("pg")
+    const blocker = new pg.default.Client({
+      connectionString: adminDatabaseUrl as string,
+    })
+    try {
+      await blocker.connect()
+      await blocker.query("SELECT pg_advisory_lock($1)", [
+        BigInt.asIntN(64, SCHEMA_DDL_LOCK_KEY),
+      ])
+
+      const impatientExecutor = createSchemaDdlExecutor({
+        pool: impatientPool,
+        createOperationLog: (query) => createSchemaOperationLog({ query }),
+      })
+      await expect(
+        impatientExecutor.execute(compileCreateTable(notesSpec("locked_out")), {
+          idempotencyKey: "v0206-lock-timeout-1",
+          commandType: "schema.table.create",
+          command: { schema: APP_SCHEMA, table: "locked_out" },
+          actor: "operator",
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT", status: 409 })
+
+      await blocker.query("SELECT pg_advisory_unlock($1)", [
+        BigInt.asIntN(64, SCHEMA_DDL_LOCK_KEY),
+      ])
+      expect(await tableExists(APP_SCHEMA, "locked_out")).toBe(false)
+      expect(await historyRow("v0206-lock-timeout-1")).toBeNull()
+    } finally {
+      await blocker.end()
+      await impatientPool.close()
+      await withClient(adminDatabaseUrl as string, async (admin) => {
+        await admin.query(
+          `ALTER ROLE ${quoteIdentifier(ADMIN_ROLE)} RESET lock_timeout`,
+        )
+      })
+    }
+  }, 20_000)
 
   it("the restricted runtime lane cannot execute DDL and gets a safe envelope", async () => {
     const runtimePool = createPool({
@@ -435,9 +574,7 @@ describe("schema DDL executor against real PostgreSQL", () => {
     try {
       const runtimeExecutor = createSchemaDdlExecutor({
         pool: runtimePool,
-        operationLog: createSchemaOperationLog({
-          query: (text, values) => runtimePool.query(text, values),
-        }),
+        createOperationLog: (query) => createSchemaOperationLog({ query }),
       })
       await expect(
         runtimeExecutor.execute(

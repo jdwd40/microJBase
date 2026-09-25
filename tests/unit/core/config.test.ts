@@ -405,6 +405,46 @@ describe("parseConfig schema-admin lane (V02-04)", () => {
     ).toThrow("SCHEMA_DATABASE_URL must not equal DATABASE_URL")
   })
 
+  it.each([
+    [
+      "postgres://runtime:secret@127.0.0.1:5432/db",
+      "postgresql://runtime@127.0.0.1/db",
+      "scheme spelling and default port",
+    ],
+    [
+      "postgres://runtime:secret@127.0.0.1:5432/db",
+      "postgres://runtime@localhost:5432/db",
+      "hostname alias",
+    ],
+    [
+      "postgres://runtime:secret@127.0.0.1:5432/db",
+      "postgres://runtime@127.0.0.1:5432/db?sslmode=require&application_name=x",
+      "query parameters",
+    ],
+  ])(
+    "rejects equivalent admin URL (%s vs %s: %s)",
+    (databaseUrl, schemaDatabaseUrl) => {
+      expect(() =>
+        parseConfig({
+          DATABASE_URL: databaseUrl,
+          SCHEMA_DATABASE_URL: schemaDatabaseUrl,
+          MICROJBASE_ADMIN_TOKEN_SHA256:
+            "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+        }),
+      ).toThrow("SCHEMA_DATABASE_URL must not equal DATABASE_URL")
+    },
+  )
+
+  it("allows a different role on the same server after normalization", () => {
+    const config = parseConfig({
+      DATABASE_URL: "postgres://runtime:secret@127.0.0.1:5432/db",
+      SCHEMA_DATABASE_URL: "postgresql://schema@localhost/db",
+      MICROJBASE_ADMIN_TOKEN_SHA256:
+        "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+    })
+    expect(config.schemaDatabaseUrl).toBe("postgresql://schema@localhost/db")
+  })
+
   it("allows SCHEMA_DATABASE_URL equal to MIGRATION_DATABASE_URL", () => {
     const config = parseConfig({
       DATABASE_URL: "postgres://runtime:secret@127.0.0.1:5432/db",

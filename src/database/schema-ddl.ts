@@ -13,15 +13,29 @@
 //   timestamp/timestamptz), and random_uuid (only for uuid). Arbitrary
 //   default SQL has no representation here.
 // - Internal schemas (microjbase, pg_catalog, information_schema, pg_*) are
-//   refused at the compiler boundary, before any SQL exists.
-// - A plan is data (statement list plus a safe description); dry-run executes
-//   it inside a transaction that always rolls back and never touches durable
-//   history.
-// - Real execution serializes on the reserved schema-DDL advisory key
-//   7921890504698152930 (distinct from the migration runner key
-//   7921890504698152929), records the operation through the V02-05 log with
-//   idempotency/replay semantics, and maps PostgreSQL errors to safe
-//   envelopes that never leak database internals.
+//   refused at the compiler boundary, before any SQL exists, matched
+//   case-insensitively.
+// - A plan is data (statement list plus a safe description), but it is also
+//   sealed: only the compiler functions in this module can produce a plan
+//   object execute() will run. Hand-built statement lists are refused before
+//   any database connection is touched, and the operation checksum recorded
+//   in history covers the sealed statement list as well as the typed command,
+//   so a replayed idempotency key cannot smuggle in different SQL.
+// - Dry-run executes a sealed plan inside a transaction that always rolls
+//   back and never touches durable history.
+// - Real execution runs on ONE connection inside ONE transaction: session
+//   hardening (standard_conforming_strings=on, pinned search_path), the
+//   reserved schema-DDL advisory key 7921890504698152930 (distinct from the
+//   migration runner key 7921890504698152929), the history row insert, the
+//   statements themselves (each submitted with the extended query protocol so
+//   one string cannot chain a second command), and the succeeded update
+//   commit or roll back together. A failure therefore never leaves a durable
+//   'running' key behind a committed change; lock_timeout / 55P03 and the
+//   statement timeout raised while waiting on the advisory key or the
+//   idempotency row map to the in-progress 409 so concurrent callers fail
+//   closed instead of hanging.
+// - PostgreSQL errors are mapped to safe envelopes that never leak database
+//   internals; logs carry only event names, command types, and counts.
 //
 // Later waves add builders (alter/drop, indexes, constraints, policies) on
 // top of this compiler core; no mutation command ships until its wave.
@@ -29,8 +43,11 @@
 import type { JsonValue, JsonPrimitive } from "../contracts/index.js"
 import { AppError, type ErrorCode } from "../core/index.js"
 
+import type pg from "pg"
+
 import type { Pool } from "./pool.js"
 import type {
+  SchemaOperationBeginOutcome,
   SchemaOperationLog,
   SchemaOperationRecord,
 } from "./schema-operation-log.js"
@@ -79,6 +96,9 @@ const TIMESTAMP_PATTERN =
 
 const DATE_PARTS_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
 
+const INT4_MIN = -2_147_483_648
+const INT4_MAX = 2_147_483_647
+
 function isLeapYear(year: number): boolean {
   return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
 }
@@ -125,13 +145,27 @@ function quoteIdentifier(name: string): string {
 // SQL literal quoting for the typed literal default template. PostgreSQL does
 // not accept parameters in DDL DEFAULT clauses, so literal defaults are
 // rendered through this audited helper after strict per-type validation; the
-// input shapes below can never break out of the literal.
+// input shapes below can never break out of the literal. NUL and backslash
+// are refused outright: every admin transaction pins
+// standard_conforming_strings=on before any statement runs, and rejecting the
+// escape character outright removes the one path that could close a literal
+// early on a misconfigured session.
 function quoteLiteral(value: string): string {
+  if (value.includes("\0")) {
+    throw invalidInput("literal defaults must not contain NUL characters")
+  }
+  if (value.includes("\\")) {
+    throw invalidInput("literal defaults must not contain backslash characters")
+  }
   return `'${value.replace(/'/g, "''")}'`
 }
 
+// Internal schemas are matched case-insensitively: unquoted PostgreSQL
+// identifiers fold to lowercase, so a lookalike such as PG_catalog or
+// MICROJBASE is the same catalog the denylist names.
 function assertManageableSchema(schema: string): void {
-  if (INTERNAL_SCHEMA_NAMES.has(schema) || schema.startsWith("pg_")) {
+  const normalized = schema.toLowerCase()
+  if (INTERNAL_SCHEMA_NAMES.has(normalized) || normalized.startsWith("pg_")) {
     throw new AppError(
       "VALIDATION_ERROR",
       "Internal schemas cannot be modified",
@@ -166,6 +200,62 @@ export interface DdlPlan {
   readonly description: string
 }
 
+// Runtime seal for compiled plans. Only the compiler functions in this
+// module add plans to the set, and execute() refuses to run anything that is
+// not sealed. A WeakSet keyed by object identity cannot be forged from JSON
+// or reconstructed by a caller, and it frees plans for garbage collection.
+const SEALED_PLANS = new WeakSet<object>()
+
+function sealPlan(plan: DdlPlan): DdlPlan {
+  Object.freeze(plan.statements)
+  Object.freeze(plan)
+  SEALED_PLANS.add(plan)
+  return plan
+}
+
+function assertPlanSealed(plan: DdlPlan): void {
+  if (!SEALED_PLANS.has(plan)) {
+    throw invalidInput(
+      "DDL plans must be compiled by the typed schema DDL compiler",
+    )
+  }
+}
+
+// Expands the shortest round-trip decimal rendering of a double (which uses
+// exponent notation outside [1e-6, 1e21)) into plain decimal notation, so
+// numeric defaults are always rendered as unambiguous SQL numeric literals.
+function expandExponential(rendered: string): string {
+  const [mantissaRaw, exponentRaw] = rendered.split("e")
+  const mantissa = mantissaRaw ?? ""
+  const exponent = Number(exponentRaw ?? "0")
+  const negative = mantissa.startsWith("-")
+  const unsigned = negative ? mantissa.slice(1) : mantissa
+  const dotIndex = unsigned.indexOf(".")
+  const integerDigits = dotIndex === -1 ? unsigned.length : dotIndex
+  const digits = unsigned.replace(".", "")
+  const pointAt = integerDigits + exponent
+  let plain: string
+  if (pointAt <= 0) {
+    plain = `0.${"0".repeat(-pointAt)}${digits}`
+  } else if (pointAt >= digits.length) {
+    plain = `${digits}${"0".repeat(pointAt - digits.length)}`
+  } else {
+    plain = `${digits.slice(0, pointAt)}.${digits.slice(pointAt)}`
+  }
+  return negative ? `-${plain}` : plain
+}
+
+function renderNumericDefault(value: number): string {
+  if (Number.isSafeInteger(value)) {
+    return String(value)
+  }
+  const rendered = String(value)
+  if (!/[eE]/.test(rendered)) {
+    return rendered
+  }
+  return expandExponential(rendered)
+}
+
 function renderLiteralDefault(
   type: DdlColumnType,
   value: JsonPrimitive,
@@ -177,10 +267,27 @@ function renderLiteralDefault(
       }
       return `${quoteLiteral(value)}::text`
     }
-    case "integer":
-    case "bigint": {
+    case "integer": {
       if (typeof value !== "number" || !Number.isInteger(value)) {
         throw invalidInput("integer literal defaults must be whole numbers")
+      }
+      if (
+        !Number.isSafeInteger(value) ||
+        value < INT4_MIN ||
+        value > INT4_MAX
+      ) {
+        throw invalidInput("integer literal defaults must fit the int4 range")
+      }
+      return String(value)
+    }
+    case "bigint": {
+      if (typeof value !== "number" || !Number.isInteger(value)) {
+        throw invalidInput("bigint literal defaults must be whole numbers")
+      }
+      // Every safe integer already fits int8; anything larger is not exactly
+      // representable as a JavaScript number and is refused.
+      if (!Number.isSafeInteger(value)) {
+        throw invalidInput("bigint literal defaults must fit the int8 range")
       }
       return String(value)
     }
@@ -188,7 +295,7 @@ function renderLiteralDefault(
       if (typeof value !== "number" || !Number.isFinite(value)) {
         throw invalidInput("numeric literal defaults must be finite numbers")
       }
-      return String(value)
+      return renderNumericDefault(value)
     }
     case "boolean": {
       if (typeof value !== "boolean") {
@@ -267,7 +374,7 @@ function renderDefaultClause(
           "random_uuid defaults are only allowed for uuid columns",
         )
       }
-      return " DEFAULT gen_random_uuid()"
+      return " DEFAULT pg_catalog.gen_random_uuid()"
   }
 }
 
@@ -285,7 +392,7 @@ export function compileCreateTable(spec: CreateTableSpec): DdlPlan {
   const renderedColumns: string[] = []
   const seenNames = new Set<string>()
   for (const column of spec.columns) {
-    if (!(column.type in TYPE_ALLOWLIST)) {
+    if (!Object.hasOwn(TYPE_ALLOWLIST, column.type)) {
       throw invalidInput(`column type "${column.type}" is not allowlisted`)
     }
     if (seenNames.has(column.name)) {
@@ -302,10 +409,10 @@ export function compileCreateTable(spec: CreateTableSpec): DdlPlan {
   }
 
   const statement = `CREATE TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} (\n  ${renderedColumns.join(",\n  ")}\n)`
-  return {
+  return sealPlan({
     statements: [statement],
     description: `create table ${spec.schema}.${spec.table} with ${String(spec.columns.length)} column(s)`,
-  }
+  })
 }
 
 export function describePlan(plan: DdlPlan): readonly string[] {
@@ -328,9 +435,17 @@ export interface ExecuteOutcome {
   readonly record: SchemaOperationRecord | null
 }
 
+// The query capability the executor hands to the operation log for the
+// duration of one transaction; it is bound to the executor's own client so
+// the history row and the DDL commit or roll back together.
+export type SchemaOperationLogQuery = (
+  text: string,
+  values?: unknown[],
+) => Promise<pg.QueryResult>
+
 export interface SchemaDdlExecutorDependencies {
   pool: Pool
-  operationLog: SchemaOperationLog
+  createOperationLog: (query: SchemaOperationLogQuery) => SchemaOperationLog
   logger?: Pick<Console, "error" | "warn" | "info" | "debug">
 }
 
@@ -380,7 +495,7 @@ export function translateDdlError(error: unknown): AppError {
     typeof error === "object" && error !== null
       ? ((error as Record<string, unknown>)["code"] as string | undefined)
       : undefined
-  if (typeof sqlState === "string" && sqlState in DDL_ERROR_MAP) {
+  if (typeof sqlState === "string" && Object.hasOwn(DDL_ERROR_MAP, sqlState)) {
     const mapped = DDL_ERROR_MAP[sqlState] as {
       code: ErrorCode
       message: string
@@ -391,11 +506,100 @@ export function translateDdlError(error: unknown): AppError {
   return new AppError("INTERNAL_ERROR", "Schema operation failed", 500)
 }
 
+// First statement of every admin transaction: pin the session to the safe
+// literal semantics and catalogue-only name resolution before any SQL from
+// the plan (or the operation log) is parsed, so a role- or database-level
+// standard_conforming_strings=off or a hostile search_path cannot change how
+// the statements are interpreted.
+const ADMIN_TRANSACTION_HARDENING_SQL =
+  "SELECT set_config('standard_conforming_strings', 'on', true), " +
+  "set_config('search_path', 'pg_catalog', true)"
+
+// Errors raised while waiting on the advisory key or the idempotency row mean
+// another caller holds the operation; fail closed with the in-progress
+// conflict instead of surfacing a timeout or hanging past the pool timeout.
+const CONCURRENT_WAIT_SQLSTATES = new Set(["55P03", "57014"])
+const DRIVER_QUERY_TIMEOUT_MESSAGE = "Query read timeout"
+
 export interface SchemaDdlExecutor {
   execute(
     plan: DdlPlan | readonly DdlPlan[],
     options: ExecuteOptions,
   ): Promise<ExecuteOutcome>
+}
+
+type BeginResult =
+  | {
+      readonly kind: "accepted"
+      readonly operationLog: SchemaOperationLog
+      readonly record: SchemaOperationRecord
+    }
+  | { readonly kind: "replay"; readonly record: SchemaOperationRecord }
+  | { readonly kind: "in_progress"; readonly record: SchemaOperationRecord }
+
+function toConcurrentWaitConflict(
+  error: unknown,
+  idempotencyKey: string,
+): AppError | null {
+  if (error instanceof AppError) {
+    return null
+  }
+  const sqlState =
+    typeof error === "object" && error !== null
+      ? ((error as Record<string, unknown>)["code"] as string | undefined)
+      : undefined
+  const driverTimeout =
+    error instanceof Error && error.message === DRIVER_QUERY_TIMEOUT_MESSAGE
+  if (
+    driverTimeout ||
+    (typeof sqlState === "string" && CONCURRENT_WAIT_SQLSTATES.has(sqlState))
+  ) {
+    return new AppError(
+      "CONFLICT",
+      "An identical operation is already in progress",
+      409,
+      { idempotencyKey },
+    )
+  }
+  return null
+}
+
+function translateConcurrentWaitError(
+  error: unknown,
+  idempotencyKey: string,
+): AppError {
+  if (error instanceof AppError) {
+    return error
+  }
+  return (
+    toConcurrentWaitConflict(error, idempotencyKey) ?? translateDdlError(error)
+  )
+}
+
+async function rollbackQuietly(client: pg.PoolClient): Promise<void> {
+  await client.query("ROLLBACK").catch(() => {
+    // Best-effort rollback; the original error is what matters.
+  })
+}
+
+// The extended query protocol rejects a statement string that carries more
+// than one command, so even a malformed compiled statement cannot chain a
+// second command. @types/pg does not model queryMode yet, hence the local
+// assertion; the pg runtime has supported it for years.
+interface ExtendedQueryConfig {
+  readonly text: string
+  readonly queryMode: "extended"
+}
+
+async function runPlanStatement(
+  client: pg.PoolClient,
+  statement: string,
+): Promise<void> {
+  const config = {
+    text: statement,
+    queryMode: "extended",
+  } as pg.QueryConfig & ExtendedQueryConfig
+  await client.query(config)
 }
 
 export function createSchemaDdlExecutor(
@@ -406,32 +610,18 @@ export function createSchemaDdlExecutor(
   ): readonly string[] => {
     const plans: readonly DdlPlan[] =
       "statements" in plan ? [plan as DdlPlan] : plan
-    return plans.flatMap((p) => [...p.statements])
-  }
-
-  async function runInTransaction(
-    statements: readonly string[],
-  ): Promise<void> {
-    const client = await deps.pool.connect()
-    try {
-      await client.query("BEGIN")
-      try {
-        await client.query("SELECT pg_advisory_xact_lock($1)", [
-          BigInt.asIntN(64, SCHEMA_DDL_LOCK_KEY),
-        ])
-        for (const statement of statements) {
-          await client.query(statement)
-        }
-        await client.query("COMMIT")
-      } catch (error: unknown) {
-        await client.query("ROLLBACK").catch(() => {
-          // Best-effort rollback; the original error is what matters.
-        })
-        throw translateDdlError(error)
-      }
-    } finally {
-      client.release()
+    if (plans.length === 0) {
+      throw invalidInput("a DDL execution needs at least one plan")
     }
+    const statements: string[] = []
+    for (const candidate of plans) {
+      assertPlanSealed(candidate)
+      if (candidate.statements.length === 0) {
+        throw invalidInput("a compiled DDL plan has no statements")
+      }
+      statements.push(...candidate.statements)
+    }
+    return statements
   }
 
   return {
@@ -446,11 +636,12 @@ export function createSchemaDdlExecutor(
         try {
           await client.query("BEGIN")
           try {
+            await client.query(ADMIN_TRANSACTION_HARDENING_SQL)
             await client.query("SELECT pg_advisory_xact_lock($1)", [
               BigInt.asIntN(64, SCHEMA_DDL_LOCK_KEY),
             ])
             for (const statement of statements) {
-              await client.query(statement)
+              await runPlanStatement(client, statement)
             }
           } finally {
             // A dry run never commits: the schema state must be identical
@@ -473,60 +664,112 @@ export function createSchemaDdlExecutor(
         return { dryRun: true, replayed: false, record: null }
       }
 
-      const outcome = await deps.operationLog.begin({
-        idempotencyKey: options.idempotencyKey,
-        commandType: options.commandType,
-        command: options.command,
-        actor: options.actor,
-      })
-
-      if (outcome.kind === "replay") {
-        deps.logger?.info(
-          JSON.stringify({
-            level: "info",
-            event: "schema_ddl_replay",
-            commandType: options.commandType,
-          }),
-        )
-        return { dryRun: false, replayed: true, record: outcome.record }
-      }
-      if (outcome.kind === "in_progress") {
-        throw new AppError(
-          "CONFLICT",
-          "An identical operation is already in progress",
-          409,
-          { idempotencyKey: options.idempotencyKey },
-        )
-      }
-
+      const client = await deps.pool.connect()
       try {
-        await runInTransaction(statements)
-      } catch (error: unknown) {
-        const safeError = translateDdlError(error)
-        await deps.operationLog.fail(outcome.record.id, safeError.code)
-        deps.logger?.warn(
-          JSON.stringify({
-            level: "warn",
-            event: "schema_ddl_failed",
-            commandType: options.commandType,
-            errorCode: safeError.code,
-          }),
-        )
-        throw safeError
-      }
+        await client.query("BEGIN")
 
-      const record = await deps.operationLog.succeed(outcome.record.id, {
-        statementCount: statements.length,
-      })
-      deps.logger?.info(
-        JSON.stringify({
-          level: "info",
-          event: "schema_ddl_executed",
-          commandType: options.commandType,
-          statementCount: statements.length,
-        }),
-      )
-      return { dryRun: false, replayed: false, record }
+        // Idempotency phase: hardening, advisory serialization, and the
+        // history-row insert all share the DDL transaction, so the row and
+        // the schema change commit or roll back together and a crash can
+        // never leave a 'running' key behind a committed change.
+        let begun: BeginResult
+        try {
+          await client.query(ADMIN_TRANSACTION_HARDENING_SQL)
+          await client.query("SELECT pg_advisory_xact_lock($1)", [
+            BigInt.asIntN(64, SCHEMA_DDL_LOCK_KEY),
+          ])
+          const operationLog = deps.createOperationLog(async (text, values) => {
+            try {
+              return await client.query(text, values)
+            } catch (error: unknown) {
+              // Timeouts raised while waiting on the idempotency row are
+              // converted here, while the raw error is still available: the
+              // operation log translates raw driver errors into safe
+              // envelopes, and AppErrors pass through that translation
+              // unchanged.
+              const waitConflict = toConcurrentWaitConflict(
+                error,
+                options.idempotencyKey,
+              )
+              throw waitConflict ?? error
+            }
+          })
+          const outcome: SchemaOperationBeginOutcome = await operationLog.begin(
+            {
+              idempotencyKey: options.idempotencyKey,
+              commandType: options.commandType,
+              command: options.command,
+              actor: options.actor,
+              statements,
+            },
+          )
+          begun =
+            outcome.kind === "accepted"
+              ? {
+                  kind: "accepted",
+                  operationLog,
+                  record: outcome.record,
+                }
+              : outcome
+        } catch (error: unknown) {
+          await rollbackQuietly(client)
+          throw translateConcurrentWaitError(error, options.idempotencyKey)
+        }
+
+        if (begun.kind === "replay") {
+          await rollbackQuietly(client)
+          deps.logger?.info(
+            JSON.stringify({
+              level: "info",
+              event: "schema_ddl_replay",
+              commandType: options.commandType,
+            }),
+          )
+          return { dryRun: false, replayed: true, record: begun.record }
+        }
+        if (begun.kind === "in_progress") {
+          await rollbackQuietly(client)
+          throw new AppError(
+            "CONFLICT",
+            "An identical operation is already in progress",
+            409,
+            { idempotencyKey: options.idempotencyKey },
+          )
+        }
+
+        try {
+          for (const statement of statements) {
+            await runPlanStatement(client, statement)
+          }
+          const record = await begun.operationLog.succeed(begun.record.id, {
+            statementCount: statements.length,
+          })
+          await client.query("COMMIT")
+          deps.logger?.info(
+            JSON.stringify({
+              level: "info",
+              event: "schema_ddl_executed",
+              commandType: options.commandType,
+              statementCount: statements.length,
+            }),
+          )
+          return { dryRun: false, replayed: false, record }
+        } catch (error: unknown) {
+          await rollbackQuietly(client)
+          const safeError = translateDdlError(error)
+          deps.logger?.warn(
+            JSON.stringify({
+              level: "warn",
+              event: "schema_ddl_failed",
+              commandType: options.commandType,
+              errorCode: safeError.code,
+            }),
+          )
+          throw safeError
+        }
+      } finally {
+        client.release()
+      }
     },
   }
 }

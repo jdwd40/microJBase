@@ -2,8 +2,9 @@
 // (V02-05).
 //
 // Every controlled schema mutation is recorded in microjbase.schema_operations
-// (migration 0005) with a checksum of its typed command, an idempotency key,
-// a terminal status, and a safe actor fingerprint. The repository defines the
+// (migration 0005) with a checksum of its typed command AND the sealed
+// statement list the executor actually runs, an idempotency key, a terminal
+// status, and a salted actor fingerprint. The repository defines the
 // replay/conflict semantics the executor relies on:
 //
 // - begin() with an unused key records a 'running' operation and returns
@@ -21,12 +22,14 @@
 //
 // The unique idempotency_key constraint is the concurrency boundary: two
 // racing begins contend for one row, and the loser observes the winner's
-// record. A raw actor label never persists — only a salted SHA-256
-// fingerprint — so future token-derived identities cannot leak into history.
+// record. A raw actor label never persists — only an HMAC-SHA-256
+// fingerprint keyed by a server secret that is never stored in
+// schema_operations — so future token-derived identities cannot leak into
+// history and stored fingerprints cannot be recomputed for guessed labels.
 //
 // The query capability is injected; this module never constructs a pool.
 
-import { createHash } from "node:crypto"
+import { createHash, createHmac, randomBytes } from "node:crypto"
 
 import type pg from "pg"
 
@@ -148,15 +151,38 @@ function sha256Hex(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex")
 }
 
+// The operation checksum covers the typed command AND the sealed statement
+// list the executor runs, so a replayed idempotency key cannot smuggle in a
+// different statement list under the same command object.
 export function computeOperationChecksum(
   commandType: string,
   command: JsonValue,
+  statements?: readonly string[],
 ): string {
-  return sha256Hex(`v1|${commandType}|${canonicalJson(command)}`)
+  const statementPart = JSON.stringify(statements ?? [])
+  return sha256Hex(
+    `v1|${commandType}|${canonicalJson(command)}|${statementPart}`,
+  )
+}
+
+// Process-local HMAC key for actor fingerprints: a server secret that is
+// never persisted to schema_operations (D-025). Stored fingerprints are
+// write-only history, so cross-restart stability is not required; keeping
+// the key out of the database means an attacker with the table alone cannot
+// recompute fingerprints for guessed actor labels.
+let actorFingerprintSecret: Buffer | null = null
+
+function getActorFingerprintSecret(): Buffer {
+  if (actorFingerprintSecret === null) {
+    actorFingerprintSecret = randomBytes(32)
+  }
+  return actorFingerprintSecret
 }
 
 export function computeActorFingerprint(actor: string): string {
-  return sha256Hex(`v1|actor|${actor.trim().toLowerCase()}`)
+  return createHmac("sha256", getActorFingerprintSecret())
+    .update(`v1|actor|${actor.trim().toLowerCase()}`, "utf8")
+    .digest("hex")
 }
 
 function deepFreeze<T>(value: T): T {
@@ -306,6 +332,12 @@ export interface BeginOperationInput {
   commandType: string
   command: JsonValue
   actor: string
+  /**
+   * Sealed statement list the executor will run. Mixed into the checksum so
+   * a replayed key with a different statement list conflicts instead of
+   * silently replaying.
+   */
+  statements?: readonly string[]
 }
 
 export interface ListOperationsInput {
@@ -410,6 +442,7 @@ export function createSchemaOperationLog(
       const checksum = computeOperationChecksum(
         input.commandType,
         input.command,
+        input.statements,
       )
       const actorFingerprint = computeActorFingerprint(input.actor)
 
@@ -502,5 +535,56 @@ export function createSchemaOperationLog(
       throw malformedRecord(`operation ${String(id)} is missing`)
     }
     return mapOperationRow(row)
+  }
+}
+
+// History rows for the schema-admin role are written by migration-owned
+// objects, so migration 0005 cannot grant them at migration time (the admin
+// role name is not known until the operator creates it). The composition
+// root probes these privileges at startup and fails with an operator-facing
+// message instead of letting the first operation die mid-flight.
+const REQUIRED_OPERATION_LOG_PRIVILEGES: readonly {
+  kind: "table" | "sequence"
+  name: string
+  privilege: string
+}[] = [
+  {
+    kind: "table",
+    name: "microjbase.schema_operations",
+    privilege: "INSERT",
+  },
+  {
+    kind: "table",
+    name: "microjbase.schema_operations",
+    privilege: "UPDATE",
+  },
+  {
+    kind: "sequence",
+    name: "microjbase.schema_operations_id_seq",
+    privilege: "USAGE",
+  },
+]
+
+export async function checkSchemaOperationLogWriteAccess(
+  client: pg.Client | pg.PoolClient,
+): Promise<void> {
+  for (const required of REQUIRED_OPERATION_LOG_PRIVILEGES) {
+    const functionName =
+      required.kind === "table"
+        ? "has_table_privilege"
+        : "has_sequence_privilege"
+    const result = await client.query<{ has: boolean }>(
+      `SELECT ${functionName}(current_user, $1, $2) AS has`,
+      [required.name, required.privilege],
+    )
+    const row = result.rows[0]
+    if (row === undefined || !row.has) {
+      throw new AppError(
+        "DATABASE_UNAVAILABLE",
+        `Schema-admin database role is missing required privilege ${required.privilege} on ${required.name}`,
+        503,
+        { object: required.name, privilege: required.privilege },
+      )
+    }
   }
 }

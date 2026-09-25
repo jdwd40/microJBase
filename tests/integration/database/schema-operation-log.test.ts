@@ -2,9 +2,12 @@
 // PostgreSQL: persistence, replay, conflict, retry, concurrency, and actor
 // fingerprint redaction.
 
+import { createHash } from "node:crypto"
+
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import {
+  checkSchemaOperationLogWriteAccess,
   computeActorFingerprint,
   createPool,
   createSchemaOperationLog,
@@ -205,14 +208,89 @@ describe("schema operation log against real PostgreSQL", () => {
         all_text: string
       }>(
         `SELECT actor_fingerprint,
-                concat_ws('|', idempotency_key, command_type, checksum, status, actor_fingerprint, coalesce(error_code, '')) AS all_text
+                concat_ws('|', idempotency_key, command_type, command::text, checksum, status, actor_fingerprint, coalesce(error_code, ''), coalesce(result::text, '')) AS all_text
          FROM microjbase.schema_operations WHERE idempotency_key = '${key}'`,
       )
       const row = result.rows[0]
       expect(row).toBeDefined()
       expect(row?.actor_fingerprint).toBe(computeActorFingerprint(actor))
+      // The fingerprint is a keyed HMAC, not a public-prefix digest an
+      // attacker could recompute for a guessed actor label.
+      const publicPrefixDigest = createHash("sha256")
+        .update(`v1|actor|${actor}`, "utf8")
+        .digest("hex")
+      expect(row?.actor_fingerprint).not.toBe(publicPrefixDigest)
       expect(row?.all_text).not.toContain(actor)
     })
+  })
+
+  it("the schema-admin lane can write history with the standard grants", async () => {
+    const client = await pool.connect()
+    try {
+      await expect(
+        checkSchemaOperationLogWriteAccess(client),
+      ).resolves.toBeUndefined()
+    } finally {
+      client.release()
+    }
+  })
+
+  it("a role without grants fails the startup probe with a clear message", async () => {
+    const NO_GRANTS_ROLE = "mjb_v0205_nogrants"
+    await withClient(adminDatabaseUrl as string, async (admin) => {
+      // The role may survive a previous interrupted run holding its schema
+      // grant, which blocks DROP ROLE until revoked.
+      await admin.query(
+        `DO $do$
+           BEGIN
+             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${NO_GRANTS_ROLE}') THEN
+               EXECUTE format('REVOKE ALL ON SCHEMA microjbase FROM %I', '${NO_GRANTS_ROLE}');
+               EXECUTE format('DROP ROLE %I', '${NO_GRANTS_ROLE}');
+             END IF;
+           END
+         $do$`,
+      )
+      await admin.query(
+        `CREATE ROLE ${quoteIdentifier(NO_GRANTS_ROLE)} WITH LOGIN PASSWORD 'nogrants_password' NOSUPERUSER NOBYPASSRLS NOCREATEROLE`,
+      )
+      // A real admin lane always holds USAGE on the microjbase schema; the
+      // probe targets the table and sequence grants only.
+      await admin.query(
+        `GRANT USAGE ON SCHEMA microjbase TO ${quoteIdentifier(NO_GRANTS_ROLE)}`,
+      )
+    })
+    const probeUrl = new URL(adminDatabaseUrl as string)
+    probeUrl.username = NO_GRANTS_ROLE
+    probeUrl.password = "nogrants_password"
+    const probePool = createPool({
+      databaseUrl: probeUrl.toString(),
+      maxConnections: 2,
+    })
+    try {
+      const client = await probePool.connect()
+      try {
+        await expect(
+          checkSchemaOperationLogWriteAccess(client),
+        ).rejects.toThrow(
+          "missing required privilege INSERT on microjbase.schema_operations",
+        )
+        await expect(
+          checkSchemaOperationLogWriteAccess(client),
+        ).rejects.toMatchObject({ code: "DATABASE_UNAVAILABLE", status: 503 })
+      } finally {
+        client.release()
+      }
+    } finally {
+      await probePool.close()
+      await withClient(adminDatabaseUrl as string, async (admin) => {
+        await admin.query(
+          `REVOKE ALL ON SCHEMA microjbase FROM ${quoteIdentifier(NO_GRANTS_ROLE)}`,
+        )
+        await admin.query(
+          `DROP ROLE IF EXISTS ${quoteIdentifier(NO_GRANTS_ROLE)}`,
+        )
+      })
+    }
   })
 
   it("lists history newest-first", async () => {

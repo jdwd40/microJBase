@@ -5,6 +5,8 @@
 // key/id selects, guarded status updates, listing). Real-PostgreSQL
 // replay/concurrency behaviour lives in the integration suite.
 
+import { createHash } from "node:crypto"
+
 import { describe, expect, it } from "vitest"
 import type pg from "pg"
 
@@ -197,6 +199,23 @@ describe("computeOperationChecksum", () => {
     const c = computeOperationChecksum("schema.table.create", { table: "b" })
     expect(new Set([a, b, c]).size).toBe(3)
   })
+
+  it("mixes the sealed statement list into the checksum", () => {
+    const commandOnly = computeOperationChecksum("schema.table.create", {
+      table: "notes",
+    })
+    const statementA = computeOperationChecksum(
+      "schema.table.create",
+      { table: "notes" },
+      ['CREATE TABLE "app"."notes" ("id" uuid)'],
+    )
+    const statementB = computeOperationChecksum(
+      "schema.table.create",
+      { table: "notes" },
+      ['CREATE TABLE "app"."notes" ("id" text)'],
+    )
+    expect(new Set([commandOnly, statementA, statementB]).size).toBe(3)
+  })
 })
 
 describe("computeActorFingerprint", () => {
@@ -210,6 +229,14 @@ describe("computeActorFingerprint", () => {
     const fingerprint = computeActorFingerprint("operator-secret-label")
     expect(fingerprint).not.toContain("operator-secret-label")
     expect(fingerprint).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it("is a keyed HMAC, not a digest of the public prefix", () => {
+    const fingerprint = computeActorFingerprint("operator")
+    const publicPrefixDigest = createHash("sha256")
+      .update("v1|actor|operator", "utf8")
+      .digest("hex")
+    expect(fingerprint).not.toBe(publicPrefixDigest)
   })
 })
 
