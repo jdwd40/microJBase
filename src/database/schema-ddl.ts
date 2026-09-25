@@ -1460,9 +1460,17 @@ export interface ExposurePrerequisiteSpec {
  * Compile the locked prerequisite guard for an expose: refuse when the target
  * is already exposed in the durable registry (so a second concurrent expose
  * conflicts instead of renaming the public alias), when row security is not
- * enabled and forced, or when no RLS policy applies to the runtime role. The
- * guard runs before any GRANT or registry upsert inside the same advisory
- * lock, so an expose can never commit against drifted RLS state.
+ * enabled and forced, when no RLS policy applies to the runtime role, or when
+ * the target participates in a cascading or nullifying foreign key. The guard
+ * runs before any GRANT or registry upsert inside the same advisory lock, so
+ * an expose can never commit against drifted RLS state.
+ *
+ * The foreign-key refusal closes the planting sequence the exposed-end guard
+ * in compileAddForeignKey cannot see: a CASCADE/SET NULL key created while
+ * both ends were unexposed rewrote rows without consulting RLS policies once
+ * a later expose succeeded. The constraint may reference the target from
+ * either end (conrelid or confrelid), so both directions are refused here,
+ * under the advisory lock (JDW-29 re-review, JDW-30).
  */
 export function compileAssertExposurePrerequisites(
   spec: ExposurePrerequisiteSpec,
@@ -1477,7 +1485,23 @@ export function compileAssertExposurePrerequisites(
 DECLARE
   microjbase_security_forced boolean;
   microjbase_policy_applies boolean;
+  microjbase_cascading_fkey boolean;
 BEGIN
+  SELECT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_constraint con
+    JOIN pg_catalog.pg_class c
+      ON c.oid = con.conrelid OR c.oid = con.confrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = ${schemaLiteral}
+      AND c.relname = ${tableLiteral}
+      AND con.contype = 'f'
+      AND (con.confupdtype IN ('c', 'n') OR con.confdeltype IN ('c', 'n'))
+  ) INTO microjbase_cascading_fkey;
+  IF microjbase_cascading_fkey THEN
+    RAISE EXCEPTION 'table participates in a cascading or nullifying foreign key and cannot be exposed'
+      USING ERRCODE = '${EXPOSURE_GUARD_SQLSTATE}';
+  END IF;
   IF EXISTS (
     SELECT 1
     FROM microjbase.exposure_registry
@@ -1622,17 +1646,18 @@ const DDL_ERROR_MAP: Record<
     status: 409,
   },
   // Raised by the locked exposure guard compiled into structural mutations
-  // and the RLS-disablement plan: the durable registry lists the target as
-  // exposed, so the command must not run (R6, JDW-28).
+  // (including cascading foreign keys) and the RLS-disablement plan: the
+  // durable registry lists the target as exposed, so the command must not
+  // run (R6, JDW-28).
   "9C003": {
     code: "CONFLICT",
-    message:
-      "Table is exposed to the data API and row-level security cannot be disabled",
+    message: "Table is exposed to the data API and cannot be modified",
     status: 409,
   },
   // Raised by the locked exposure-prerequisite guard compiled into every
-  // expose plan: the target is already exposed, row security is not enabled
-  // and forced, or no policy applies to the runtime role (JDW-27).
+  // expose plan: the target is already exposed, participates in a cascading
+  // or nullifying foreign key, row security is not enabled and forced, or no
+  // policy applies to the runtime role (JDW-27, JDW-30).
   "9C004": {
     code: "CONFLICT",
     message:
@@ -1664,8 +1689,11 @@ export function translateDdlError(error: unknown): AppError {
 // literal semantics and catalogue-only name resolution before any SQL from
 // the plan (or the operation log) is parsed, so a role- or database-level
 // standard_conforming_strings=off or a hostile search_path cannot change how
-// the statements are interpreted.
-const ADMIN_TRANSACTION_HARDENING_SQL =
+// the statements are interpreted. The exposure verification and its
+// ownership-comparison probe pin the same settings on their own dedicated
+// sessions (schema-exposure.ts), because their CREATE POLICY and pg_get_expr
+// deparse run outside the executor's transaction.
+export const ADMIN_TRANSACTION_HARDENING_SQL =
   "SELECT set_config('standard_conforming_strings', 'on', true), " +
   "set_config('search_path', 'pg_catalog', true)"
 

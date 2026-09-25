@@ -172,18 +172,22 @@ const TABLE_RLS_SQL = `SELECT c.relrowsecurity, c.relforcerowsecurity
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'`
 
-// Every policy applicable to the runtime role, with its expressions rendered
-// back through pg_get_expr. Exposure verification no longer accepts "any
-// applicable policy": it requires the module-owned ownership policy for each
-// command the runtime role will exercise and rejects any other permissive
-// policy applicable to the role, because permissive policies OR together and
-// a broader USING (true) beside the ownership policy would let one tenant
-// read another tenant's rows (JDW-27).
+// Every policy applicable to the runtime role. Exposure verification no
+// longer accepts "any applicable policy": it requires the module-owned
+// ownership policy for each command the runtime role will exercise and
+// rejects any other permissive policy applicable to the role, because
+// permissive policies OR together and a broader USING (true) beside the
+// ownership policy would let one tenant read another tenant's rows (JDW-27).
+//
+// The expressions are NOT deparsed here: pg_get_expr renders operators
+// unqualified whenever they are visible in the session search_path, so a
+// hostile first search_path entry would make a planted always-true operator
+// deparse to the same string as the module's frozen comparison. The probe
+// deparses both the candidate policies and its own probe policy on a pinned
+// search_path instead (JDW-30).
 const APPLICABLE_POLICIES_SQL = `SELECT pol.polname AS policy_name,
        pol.polcmd AS command,
-       pol.polpermissive AS permissive,
-       pg_catalog.pg_get_expr(pol.polqual, pol.polrelid) AS using_expression,
-       pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid) AS check_expression
+       pol.polpermissive AS permissive
   FROM pg_catalog.pg_policy pol
   JOIN pg_catalog.pg_class c ON c.oid = pol.polrelid
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -200,8 +204,6 @@ interface ApplicablePolicyRow {
   policy_name: string
   command: string
   permissive: boolean
-  using_expression: string | null
-  check_expression: string | null
 }
 
 // The four commands the data API exercises on an exposed table, mapped to the
@@ -223,7 +225,23 @@ const RUNTIME_EXERCISED_COMMANDS: Readonly<
 // comparison inside a rolled-back transaction and returns what pg_get_expr
 // renders for it on THIS server, so the requirement is exactly the
 // expression the module itself compiles (JDW-27).
+//
+// Both renderings must be produced on a session pinned to
+// standard_conforming_strings=on and search_path=pg_catalog. pg_get_expr
+// schema-qualifies an operator only when it is NOT visible in the session
+// search_path, so on an unpinned connection a policy planted under a hostile
+// search_path (with, say, an always-true uuid = operator) deparse-matches
+// the module's own comparison and verification accepts it (JDW-29
+// re-review, JDW-30).
 export interface RenderedOwnershipComparison {
+  readonly using: string | null
+  readonly withCheck: string | null
+}
+
+// The expressions of one real policy on the verified table, deparsed on the
+// same pinned probe session the frozen comparison is rendered on, so the two
+// are compared under identical name-resolution rules.
+export interface RenderedPolicyExpressions {
   readonly using: string | null
   readonly withCheck: string | null
 }
@@ -235,6 +253,11 @@ export interface OwnershipComparisonProbe {
     column: string,
     template: OwnershipPolicyTemplate,
   ): Promise<RenderedOwnershipComparison>
+  deparse(
+    schema: string,
+    table: string,
+    policyName: string,
+  ): Promise<RenderedPolicyExpressions>
 }
 
 const OWNERSHIP_TEMPLATES: readonly OwnershipPolicyTemplate[] = Object.freeze([
@@ -269,8 +292,10 @@ function modulePolicyIdentity(
 // template expects: the deterministic module name over one of the table's
 // columns, the template's exact FOR command, and the frozen ownership
 // expression on exactly the clause(s) that template renders (USING for
-// read/update/delete, WITH CHECK for insert/update), as rendered by this
-// PostgreSQL server for a probe policy carrying the module's own comparison.
+// read/update/delete, WITH CHECK for insert/update), with the candidate's
+// expressions deparsed on the probe's pinned session and the requirement
+// rendered by this server for a probe policy carrying the module's own
+// comparison.
 async function matchesModuleOwnershipPolicy(
   row: ApplicablePolicyRow,
   table: string,
@@ -279,6 +304,7 @@ async function matchesModuleOwnershipPolicy(
   schema: string,
   probe: OwnershipComparisonProbe,
   cache: Map<string, Promise<RenderedOwnershipComparison>>,
+  candidateCache: Map<string, Promise<RenderedPolicyExpressions>>,
 ): Promise<boolean> {
   const identity = modulePolicyIdentity(row.policy_name, table, columnNames)
   if (identity === null || identity.template !== template) {
@@ -291,17 +317,22 @@ async function matchesModuleOwnershipPolicy(
     rendered = probe.render(schema, table, identity.column, template)
     cache.set(cacheKey, rendered)
   }
-  const expected = await rendered
-  if (shape.using && row.using_expression !== expected.using) {
+  let candidate = candidateCache.get(row.policy_name)
+  if (candidate === undefined) {
+    candidate = probe.deparse(schema, table, row.policy_name)
+    candidateCache.set(row.policy_name, candidate)
+  }
+  const [expected, actual] = await Promise.all([rendered, candidate])
+  if (shape.using && actual.using !== expected.using) {
     return false
   }
-  if (!shape.using && row.using_expression !== null) {
+  if (!shape.using && actual.using !== null) {
     return false
   }
-  if (shape.withCheck && row.check_expression !== expected.withCheck) {
+  if (shape.withCheck && actual.withCheck !== expected.withCheck) {
     return false
   }
-  if (!shape.withCheck && row.check_expression !== null) {
+  if (!shape.withCheck && actual.withCheck !== null) {
     return false
   }
   return true
@@ -441,6 +472,7 @@ export async function verifyExposureCandidate(
     string,
     Promise<RenderedOwnershipComparison>
   >()
+  const candidateCache = new Map<string, Promise<RenderedPolicyExpressions>>()
   for (const { template, policyCommand } of RUNTIME_EXERCISED_COMMANDS) {
     const commandPolicies = applicablePolicies.filter(
       (row) => row.command === policyCommand || row.command === "*",
@@ -456,6 +488,7 @@ export async function verifyExposureCandidate(
             schema,
             probe,
             comparisonCache,
+            candidateCache,
           ),
         ),
       )
@@ -478,6 +511,7 @@ export async function verifyExposureCandidate(
               schema,
               probe,
               comparisonCache,
+              candidateCache,
             )),
         ),
       )
@@ -611,6 +645,49 @@ export async function checkExposureRegistryWriteAccess(
 // The command service.
 // ---------------------------------------------------------------------------
 
+// Pin the probe session, inside its transaction, to the same literal
+// semantics and catalogue-only name resolution the executor applies to real
+// DDL (schema-ddl.ts ADMIN_TRANSACTION_HARDENING_SQL). set_config with
+// is_local=true reverts at transaction end, so the pool connection is never
+// left pinned for its next user. Without this, a hostile first search_path
+// entry would let a planted operator bind at CREATE POLICY time and render
+// unqualified through pg_get_expr, so a forged ownership policy would
+// deparse to the module's own frozen comparison (JDW-30).
+const PROBE_SESSION_PIN_SQL =
+  "SELECT pg_catalog.set_config('standard_conforming_strings', 'on', true), " +
+  "pg_catalog.set_config('search_path', 'pg_catalog', true)"
+
+// The candidate policy's expressions, rendered through pg_get_expr on the
+// pinned session. Every catalogue reference is pg_catalog-qualified because
+// the pin does not make the statement text safe, only the name resolution.
+const POLICY_EXPRESSIONS_SQL = `SELECT pg_catalog.pg_get_expr(pol.polqual, pol.polrelid) AS using,
+       pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid) AS check
+  FROM pg_catalog.pg_policy pol
+  JOIN pg_catalog.pg_class c ON c.oid = pol.polrelid
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = $1 AND c.relname = $2 AND pol.polname = $3`
+
+// Run `run` on a dedicated pooled connection whose transaction pins the
+// session first. The transaction always rolls back: the probe policy must
+// never persist, and the pin must never leak to the connection's next user.
+async function withPinnedProbeClient<T>(
+  pool: Pool,
+  run: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect()
+  try {
+    await client.query("BEGIN")
+    try {
+      await client.query(PROBE_SESSION_PIN_SQL)
+      return await run(client)
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined)
+    }
+  } finally {
+    client.release()
+  }
+}
+
 export function createSchemaExposureService(
   deps: SchemaExposureServiceDependencies,
 ): SchemaExposureService {
@@ -618,55 +695,60 @@ export function createSchemaExposureService(
   const operationLog = createSchemaOperationLog({ query })
 
   // Render the module's frozen ownership comparison through this server's
-  // own deparser: create a uniquely named probe policy carrying the compiled
-  // comparison inside a transaction that always rolls back, and read back
-  // what pg_get_expr renders for it. Because the probe is created with the
-  // same compiled SQL the module's real policies use, its rendering is
-  // exactly what a genuine managed policy produces on this server — version
-  // differences in the deparser cannot cause a false rejection (JDW-27).
+  // own deparser on the pinned session: create a uniquely named probe policy
+  // carrying the compiled comparison inside a transaction that always rolls
+  // back, and read back what pg_get_expr renders for it. Because the probe
+  // is created with the same compiled SQL the module's real policies use and
+  // both are deparsed under the pinned search_path, its rendering is exactly
+  // what a genuine managed policy produces on this server — version
+  // differences in the deparser cannot cause a false rejection, and a
+  // hostile search_path cannot cause a false acceptance (JDW-27, JDW-30).
   const comparisonProbe: OwnershipComparisonProbe = {
     async render(schema, table, column, template) {
       const shape = ownershipPolicyTemplateShape(template)
       const probeName = `mjb_probe_${randomBytes(8).toString("hex")}`
       const comparison = compileOwnershipComparison(column)
-      const client = await deps.pool.connect()
-      try {
-        await client.query("BEGIN")
-        try {
-          let statement =
-            `CREATE POLICY ${quoteIdentifier(probeName)} ` +
-            `ON ${quoteIdentifier(schema)}.${quoteIdentifier(table)} ` +
-            `FOR ${shape.command} TO ${quoteIdentifier(deps.runtimeRole)}`
-          if (shape.using) {
-            statement += ` USING (${comparison})`
-          }
-          if (shape.withCheck) {
-            statement += ` WITH CHECK (${comparison})`
-          }
-          await client.query(statement)
-          const rendered = await client.query<{
-            using: string | null
-            check: string | null
-          }>(
-            `SELECT pg_catalog.pg_get_expr(pol.polqual, pol.polrelid) AS using,
-                    pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid) AS check
-               FROM pg_catalog.pg_policy pol
-               JOIN pg_catalog.pg_class c ON c.oid = pol.polrelid
-               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname = $1 AND c.relname = $2 AND pol.polname = $3`,
-            [schema, table, probeName],
-          )
-          const row = rendered.rows[0]
-          if (row === undefined) {
-            throw new AppError("INTERNAL_ERROR", "Schema operation failed", 500)
-          }
-          return { using: row.using, withCheck: row.check }
-        } finally {
-          await client.query("ROLLBACK").catch(() => undefined)
+      return withPinnedProbeClient(deps.pool, async (client) => {
+        let statement =
+          `CREATE POLICY ${quoteIdentifier(probeName)} ` +
+          `ON ${quoteIdentifier(schema)}.${quoteIdentifier(table)} ` +
+          `FOR ${shape.command} TO ${quoteIdentifier(deps.runtimeRole)}`
+        if (shape.using) {
+          statement += ` USING (${comparison})`
         }
-      } finally {
-        client.release()
-      }
+        if (shape.withCheck) {
+          statement += ` WITH CHECK (${comparison})`
+        }
+        await client.query(statement)
+        const rendered = await client.query<{ using: string | null; check: string | null }>(
+          `SELECT pg_catalog.pg_get_expr(pol.polqual, pol.polrelid) AS using,
+                  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid) AS check
+             FROM pg_catalog.pg_policy pol
+             JOIN pg_catalog.pg_class c ON c.oid = pol.polrelid
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1 AND c.relname = $2 AND pol.polname = $3`,
+          [schema, table, probeName],
+        )
+        const row = rendered.rows[0]
+        if (row === undefined) {
+          throw new AppError("INTERNAL_ERROR", "Schema operation failed", 500)
+        }
+        return { using: row.using, withCheck: row.check }
+      })
+    },
+
+    async deparse(schema, table, policyName) {
+      return withPinnedProbeClient(deps.pool, async (client) => {
+        const rendered = await client.query<{
+          using: string | null
+          check: string | null
+        }>(POLICY_EXPRESSIONS_SQL, [schema, table, policyName])
+        const row = rendered.rows[0]
+        if (row === undefined) {
+          throw new AppError("INTERNAL_ERROR", "Schema operation failed", 500)
+        }
+        return { using: row.using, withCheck: row.check }
+      })
     },
   }
 

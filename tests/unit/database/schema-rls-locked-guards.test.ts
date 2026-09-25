@@ -18,6 +18,7 @@ import {
   compileDisableRowSecurity,
   createSchemaExposureService,
   ownershipPolicyName,
+  ownershipPolicyTemplateShape,
   translateDdlError,
   type ExecuteOutcome,
   type SchemaDdlExecutor,
@@ -87,7 +88,7 @@ describe("translateDdlError R6 mappings (JDW-28)", () => {
     })
     expect(mapped).toMatchObject({ code: "CONFLICT", status: 409 })
     expect(mapped.message).toBe(
-      "Table is exposed to the data API and row-level security cannot be disabled",
+      "Table is exposed to the data API and cannot be modified",
     )
     expect(mapped.message).not.toContain("secret_name")
   })
@@ -202,38 +203,30 @@ function itemsCatalogue(): SchemaCatalogue {
   return { schemas: [schema] }
 }
 
-// The four module-owned ownership policies the strict verification requires,
-// rendered exactly as PostgreSQL 18.6 deparses them.
+// The four module-owned ownership policies the strict verification requires.
+// Expressions are no longer deparsed by the preflight query: the pinned
+// probe deparse answers them per policy name below.
 function modulePolicyRows() {
-  const deparse = ownershipDeparse("owner")
   return [
     {
       policy_name: ownershipPolicyName("items", "owner", "read"),
       command: "r",
       permissive: true,
-      using_expression: deparse,
-      check_expression: null,
     },
     {
       policy_name: ownershipPolicyName("items", "owner", "insert"),
       command: "a",
       permissive: true,
-      using_expression: null,
-      check_expression: deparse,
     },
     {
       policy_name: ownershipPolicyName("items", "owner", "update"),
       command: "w",
       permissive: true,
-      using_expression: deparse,
-      check_expression: deparse,
     },
     {
       policy_name: ownershipPolicyName("items", "owner", "delete"),
       command: "d",
       permissive: true,
-      using_expression: deparse,
-      check_expression: null,
     },
   ]
 }
@@ -243,9 +236,13 @@ function fakeExposurePool(): Pool {
   // dedicated client and reads back pg_get_expr's rendering, so the fake
   // tracks the latest CREATE POLICY shape to render the matching clause.
   let probeShape: { using: boolean; withCheck: boolean } | null = null
-  const dispatch = async (text: string) => {
+  const dispatch = async (text: string, values?: readonly unknown[]) => {
     const empty = { rows: [], rowCount: 0, command: "", oid: 0, fields: [] }
     if (text === "BEGIN" || text === "ROLLBACK") {
+      return { ...empty } as never
+    }
+    if (text.includes("set_config")) {
+      // The pinned probe session hardening; the fake applies no resolution.
       return { ...empty } as never
     }
     if (text.startsWith("CREATE POLICY")) {
@@ -306,8 +303,28 @@ function fakeExposurePool(): Pool {
       return { ...empty, rows: modulePolicyRows() } as never
     }
     if (text.includes("pg_get_expr")) {
-      const shape = probeShape ?? { using: true, withCheck: false }
       const deparse = ownershipDeparse("owner")
+      // The pinned probe both renders its own throwaway policy (named
+      // mjb_probe_*) and deparses candidate policies by name; answer each
+      // with the clauses that policy's template uses.
+      const name = values?.[2]
+      if (typeof name === "string" && !name.startsWith("mjb_probe_")) {
+        for (const template of ["read", "insert", "update", "delete"] as const) {
+          if (name === ownershipPolicyName("items", "owner", template)) {
+            const shape = ownershipPolicyTemplateShape(template)
+            return {
+              ...empty,
+              rows: [
+                {
+                  using: shape.using ? deparse : null,
+                  check: shape.withCheck ? deparse : null,
+                },
+              ],
+            } as never
+          }
+        }
+      }
+      const shape = probeShape ?? { using: true, withCheck: false }
       return {
         ...empty,
         rows: [

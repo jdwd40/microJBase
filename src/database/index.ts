@@ -213,6 +213,7 @@ export {
   type ExposureVerification,
   type OwnershipComparisonProbe,
   type RenderedOwnershipComparison,
+  type RenderedPolicyExpressions,
   type SchemaExposureService,
   type SchemaExposureServiceDependencies,
   type UnexposeTableCommand,

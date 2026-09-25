@@ -86,49 +86,42 @@ interface FakePolicyRow {
   policy_name: string
   command: string
   permissive: boolean
-  using_expression: string | null
-  check_expression: string | null
 }
 
 // The four module-owned ownership policies the verification requires, bound
 // to the "id" ownership column of the fake table.
 function moduleOwnershipPolicies(table: string): FakePolicyRow[] {
-  const expr = ownershipExpr("id")
   return [
     {
       policy_name: ownershipPolicyName(table, "id", "read"),
       command: "r",
       permissive: true,
-      using_expression: expr,
-      check_expression: null,
     },
     {
       policy_name: ownershipPolicyName(table, "id", "insert"),
       command: "a",
       permissive: true,
-      using_expression: null,
-      check_expression: expr,
     },
     {
       policy_name: ownershipPolicyName(table, "id", "update"),
       command: "w",
       permissive: true,
-      using_expression: expr,
-      check_expression: expr,
     },
     {
       policy_name: ownershipPolicyName(table, "id", "delete"),
       command: "d",
       permissive: true,
-      using_expression: expr,
-      check_expression: null,
     },
   ]
 }
 
-// The probe stands in for the service's rolled-back probe policy: it returns
-// the same rendering the fake policy rows above carry for the frozen
-// comparison, so a module-named policy row verifies and anything else fails.
+// The probe stands in for the service's pinned-session probe: render()
+// returns the same rendering the module policies carry for the frozen
+// comparison, and deparse() returns the frozen comparison for module-named
+// policies (the clauses each template uses) while the broad permissive row
+// keeps its wider expression, so a module-named policy row verifies and
+// anything else fails.
+const OWNERSHIP_TEMPLATES = ["read", "insert", "update", "delete"] as const
 const fakeProbe: OwnershipComparisonProbe = {
   async render(_schema, _table, column, template) {
     const shape = ownershipPolicyTemplateShape(template)
@@ -136,6 +129,21 @@ const fakeProbe: OwnershipComparisonProbe = {
       using: shape.using ? ownershipExpr(column) : null,
       withCheck: shape.withCheck ? ownershipExpr(column) : null,
     }
+  },
+  async deparse(_schema, table, policyName) {
+    if (policyName === "operator_broad_select") {
+      return { using: "true", withCheck: null }
+    }
+    for (const template of OWNERSHIP_TEMPLATES) {
+      if (policyName === ownershipPolicyName(table, "id", template)) {
+        const shape = ownershipPolicyTemplateShape(template)
+        return {
+          using: shape.using ? ownershipExpr("id") : null,
+          withCheck: shape.withCheck ? ownershipExpr("id") : null,
+        }
+      }
+    }
+    return { using: null, withCheck: null }
   },
 }
 
@@ -261,8 +269,6 @@ describe("verifyExposureCandidate", () => {
       policy_name: "operator_broad_select",
       command: "r",
       permissive: true,
-      using_expression: "true",
-      check_expression: null,
     }
     const { query } = probeFake([broad])
     await expect(
