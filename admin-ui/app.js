@@ -312,6 +312,12 @@ async function submitLogin(form) {
   if (token === "") {
     return
   }
+  if (input !== null) {
+    // The token lives in the store's closure from here on; never leave it
+    // sitting in the hidden password control (or a password manager's save
+    // prompt tied to it).
+    input.value = ""
+  }
   setToken(token)
   const probe = await client.capabilities()
   if (probe.ok) {
@@ -670,11 +676,13 @@ function bindEvents() {
             default_value: "",
           }),
         )
+        revalidateFingerprint()
       }
     } else if (action === "column-row-remove") {
       const row = control.closest("[data-column-row]")
       if (row !== null) {
         row.remove()
+        revalidateFingerprint()
       }
     }
   })
@@ -698,13 +706,19 @@ function bindEvents() {
   })
 }
 
-function handleFormEdit(event) {
+/**
+ * Re-read the form and disarm apply when the built command no longer matches
+ * the fingerprint of the successful dry run. Shared by the input/change
+ * listener and the create-table row add/remove buttons, which mutate the DOM
+ * without emitting either event.
+ */
+function revalidateFingerprint() {
   const state = formState
   if (state === null) {
     return
   }
   const form = mutationFormElement()
-  if (form === null || !form.contains(event.target)) {
+  if (form === null) {
     return
   }
   const values = readFormValues(form, state.spec)
@@ -717,6 +731,18 @@ function handleFormEdit(event) {
       clearFormFeedback()
     }
   }
+}
+
+function handleFormEdit(event) {
+  const state = formState
+  if (state === null) {
+    return
+  }
+  const form = mutationFormElement()
+  if (form === null || !form.contains(event.target)) {
+    return
+  }
+  revalidateFingerprint()
 }
 
 function boot() {

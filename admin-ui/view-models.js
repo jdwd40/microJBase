@@ -66,12 +66,9 @@ export function summarizeSnapshot(snapshot) {
   return { schemas, migrations }
 }
 
-/** True when the snapshot has nothing to show in the overview. */
+/** True only when the snapshot lists no schemas at all; schemas without tables still render their overview cards. */
 export function isEmptySnapshot(summary) {
-  return (
-    summary.schemas.length === 0 ||
-    summary.schemas.every((schema) => schema.tables.length === 0)
-  )
+  return summary.schemas.length === 0
 }
 
 /** Full detail model for one table view. */
@@ -209,6 +206,61 @@ export const POLICY_TEMPLATES = Object.freeze([
   "delete",
 ])
 
+/**
+ * Frozen safe-conversion matrix (docs/admin-api.md), mirrored from the
+ * server compiler: integer widens to bigint or numeric, bigint to numeric,
+ * date to timestamp. Every other source has no safe target.
+ */
+export const SAFE_TYPE_TARGETS = Object.freeze({
+  text: Object.freeze([]),
+  integer: Object.freeze(["bigint", "numeric"]),
+  bigint: Object.freeze(["numeric"]),
+  boolean: Object.freeze([]),
+  uuid: Object.freeze([]),
+  timestamp: Object.freeze([]),
+  timestamptz: Object.freeze([]),
+  date: Object.freeze(["timestamp"]),
+  numeric: Object.freeze([]),
+  jsonb: Object.freeze([]),
+})
+
+/**
+ * Inverse of the server catalogue map (schema-ddl.ts CATALOGUE_TYPE_RENDERINGS
+ * via mapCatalogueType): the snapshot stores format_type output, so timestamp
+ * columns report "timestamp without time zone" / "timestamp with time zone"
+ * rather than the allowlist tokens. Anything else is unmanageable.
+ */
+const CATALOGUE_TYPE_TOKENS = Object.freeze({
+  text: "text",
+  integer: "integer",
+  bigint: "bigint",
+  boolean: "boolean",
+  uuid: "uuid",
+  "timestamp without time zone": "timestamp",
+  "timestamp with time zone": "timestamptz",
+  date: "date",
+  numeric: "numeric",
+  jsonb: "jsonb",
+})
+
+/** Map a catalogue rendering onto the frozen type token, or null when unmanageable. */
+export function catalogueTypeToken(renderedType) {
+  return CATALOGUE_TYPE_TOKENS[String(renderedType)] ?? null
+}
+
+/**
+ * Safe change-type targets for one column of a table detail model: [] when
+ * the column is unknown or its rendering is outside the frozen allowlist.
+ */
+export function safeChangeTargets(model, columnName) {
+  const column = model?.columns.find((entry) => entry.name === columnName)
+  if (column === undefined) {
+    return []
+  }
+  const token = catalogueTypeToken(column.renderedType)
+  return token === null ? [] : SAFE_TYPE_TARGETS[token]
+}
+
 const IDENTIFIER_PATTERN = /^[a-z_][a-z0-9_]{0,62}$/
 const ALIAS_PATTERN = /^[a-z][a-z0-9_]{0,62}$/
 
@@ -240,6 +292,23 @@ export function parseLiteralDefault(text) {
     // Not JSON: treat the box content as a plain string literal.
   }
   return trimmed
+}
+
+/**
+ * Reject whole-number literal defaults that JSON.parse would round before
+ * the dry run can preview them: anything outside Number.isSafeInteger, or
+ * whose parsed form does not re-render as the same integer text, is refused
+ * client-side so the operator never applies a default they did not type.
+ */
+function validateLiteralText(text, errors) {
+  const trimmed = String(text).trim()
+  if (!/^-?\d+$/.test(trimmed)) {
+    return
+  }
+  const parsed = JSON.parse(trimmed)
+  if (!Number.isSafeInteger(parsed) || String(parsed) !== trimmed) {
+    errors.push(`Literal default ${trimmed} is not a safe integer.`)
+  }
 }
 
 function defaultTemplate(
@@ -324,6 +393,9 @@ function validateColumnValues(values, prefix, errors) {
   }
   if (kind === "random_uuid" && values[`${prefix}type`] !== "uuid") {
     errors.push("random_uuid defaults only compile on uuid columns.")
+  }
+  if (kind === "literal") {
+    validateLiteralText(values[`${prefix}default_value`] ?? "", errors)
   }
 }
 
@@ -558,20 +630,21 @@ export const MUTATION_SPECS = Object.freeze({
       if (!DEFAULT_KINDS.includes(kind)) {
         errors.push("Default must come from the frozen template kinds.")
       }
+      if (kind === "literal") {
+        validateLiteralText(values.default_value ?? "", errors)
+      }
+      const token =
+        column === undefined ? null : catalogueTypeToken(column.renderedType)
       if (
         kind === "current_timestamp" &&
         column !== undefined &&
-        !["timestamp", "timestamptz"].includes(column.renderedType)
+        !["timestamp", "timestamptz"].includes(token)
       ) {
         errors.push(
           "current_timestamp defaults only compile on timestamp and timestamptz columns.",
         )
       }
-      if (
-        kind === "random_uuid" &&
-        column !== undefined &&
-        column.renderedType !== "uuid"
-      ) {
+      if (kind === "random_uuid" && column !== undefined && token !== "uuid") {
         errors.push("random_uuid defaults only compile on uuid columns.")
       }
     },
@@ -583,8 +656,14 @@ export const MUTATION_SPECS = Object.freeze({
         default: defaultTemplate(values),
       }
     },
-    summarize: (values, ctx) =>
-      `Set the default of ${ctx.schema}.${ctx.table}.${ctx.column} to ${values.default_kind}.`,
+    summarize(values, ctx) {
+      const template = defaultTemplate(values)
+      const detail =
+        template.kind === "literal"
+          ? `literal ${JSON.stringify(template.value)}`
+          : template.kind
+      return `Set the default of ${ctx.schema}.${ctx.table}.${ctx.column} to ${detail}.`
+    },
   },
 
   "column.default.drop": {
@@ -657,13 +736,15 @@ export const MUTATION_SPECS = Object.freeze({
         kind: "select",
         label: "New type",
         required: true,
-        options: COLUMN_TYPES,
+        options: (ctx) => safeChangeTargets(ctx.model, ctx.column),
         placeholder: "Choose the target type",
       },
     ],
-    validate(values, errors) {
-      if (!COLUMN_TYPES.includes(values.to_type)) {
-        errors.push("Target type must come from the frozen allowlist.")
+    validate(values, errors, ctx) {
+      if (!safeChangeTargets(ctx.model, ctx.column).includes(values.to_type)) {
+        errors.push(
+          "Target type must be a safe conversion for this column's current type.",
+        )
       }
     },
     buildInput: (values, ctx) => ({

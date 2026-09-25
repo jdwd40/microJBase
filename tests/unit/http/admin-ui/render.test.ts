@@ -18,6 +18,7 @@ describe("render.renderLogin", () => {
     expect(html).toContain('for="operator-token"')
     expect(html).toContain('type="password"')
     expect(html).toContain('autocomplete="off"')
+    expect(html).not.toContain("action=")
     expect(html).not.toContain("form-error")
   })
 
@@ -108,6 +109,18 @@ describe("render.renderSchemaList", () => {
   it("renders the no-schemas empty state", () => {
     const html = render.renderSchemaList({ schemas: [], migrations: [] })
     expect(html).toContain("No schemas")
+  })
+
+  it("keeps the Create table action on schemas whose tables are all empty", () => {
+    const html = render.renderSchemaList({
+      schemas: [
+        { name: "app", owner: "o", classification: "operator", tables: [] },
+      ],
+      migrations: [],
+    })
+    expect(html).toContain("No tables in this schema.")
+    expect(html).toContain('data-spec="table.create"')
+    expect(html).not.toContain("No schemas")
   })
 })
 

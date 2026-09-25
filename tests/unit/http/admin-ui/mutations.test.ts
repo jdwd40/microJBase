@@ -325,6 +325,156 @@ describe("view-model mutation specs", () => {
     expect(errors.join(" ")).toContain("SET NULL")
   })
 
+  function modelWithColumns(columns: unknown[]) {
+    return viewModels.tableDetailModel({
+      ...fixtureSnapshot.schemas[0]!.tables[0]!,
+      columns,
+    })
+  }
+
+  function columnFixture(name: string, renderedType: string) {
+    return {
+      ordinal: 1,
+      name,
+      isNullable: true,
+      defaultExpression: null,
+      generated: "none",
+      identity: "none",
+      renderedType,
+    }
+  }
+
+  it("accepts current_timestamp on real catalogue timestamp renderings", () => {
+    const model = modelWithColumns([
+      columnFixture("created_at", "timestamp without time zone"),
+      columnFixture("updated_at", "timestamp with time zone"),
+      columnFixture("title", "text"),
+    ])
+    const spec = viewModels.mutationSpec("column.default.set")
+    for (const column of ["created_at", "updated_at"]) {
+      const errors: string[] = []
+      spec.validate(
+        { default_kind: "current_timestamp", default_value: "" },
+        errors,
+        { schema: "app", table: "todos", column, model },
+      )
+      expect(errors).toEqual([])
+    }
+    const errors: string[] = []
+    spec.validate(
+      { default_kind: "current_timestamp", default_value: "" },
+      errors,
+      { schema: "app", table: "todos", column: "title", model },
+    )
+    expect(errors.join(" ")).toContain("timestamp and timestamptz")
+  })
+
+  it("keeps random_uuid tied to the uuid rendering", () => {
+    const model = modelWithColumns([
+      columnFixture("owner_id", "uuid"),
+      columnFixture("created_at", "timestamp without time zone"),
+    ])
+    const spec = viewModels.mutationSpec("column.default.set")
+    const errors: string[] = []
+    spec.validate({ default_kind: "random_uuid", default_value: "" }, errors, {
+      schema: "app",
+      table: "todos",
+      column: "owner_id",
+      model,
+    })
+    expect(errors).toEqual([])
+    const wrong: string[] = []
+    spec.validate({ default_kind: "random_uuid", default_value: "" }, wrong, {
+      schema: "app",
+      table: "todos",
+      column: "created_at",
+      model,
+    })
+    expect(wrong.join(" ")).toContain("uuid")
+  })
+
+  it("rejects whole-number literal defaults that JSON.parse would round", () => {
+    const model = modelWithColumns([columnFixture("qty", "bigint")])
+    const setDefault = viewModels.mutationSpec("column.default.set")
+    const rounded: string[] = []
+    setDefault.validate(
+      { default_kind: "literal", default_value: "9007199254740993" },
+      rounded,
+      { schema: "app", table: "todos", column: "qty", model },
+    )
+    expect(rounded.join(" ")).toContain("safe integer")
+
+    const exact: string[] = []
+    setDefault.validate(
+      { default_kind: "literal", default_value: "42" },
+      exact,
+      { schema: "app", table: "todos", column: "qty", model },
+    )
+    expect(exact).toEqual([])
+
+    const addColumn = viewModels.mutationSpec("column.add")
+    const addErrors: string[] = []
+    addColumn.validate(
+      {
+        name: "qty",
+        type: "bigint",
+        nullable: true,
+        default_kind: "literal",
+        default_value: "9007199254740993",
+      },
+      addErrors,
+    )
+    expect(addErrors.join(" ")).toContain("safe integer")
+  })
+
+  it("prints the parsed literal in the set-default preview summary", () => {
+    const spec = viewModels.mutationSpec("column.default.set")
+    expect(
+      spec.summarize(
+        { default_kind: "literal", default_value: "42" },
+        CTX_COLUMN,
+      ),
+    ).toBe("Set the default of app.todos.title to literal 42.")
+    expect(
+      spec.summarize({ default_kind: "none", default_value: "" }, CTX_COLUMN),
+    ).toBe("Set the default of app.todos.title to none.")
+  })
+
+  it("limits change-type targets to the frozen safe-conversion matrix", () => {
+    const model = modelWithColumns([
+      columnFixture("qty", "integer"),
+      columnFixture("title", "text"),
+      columnFixture("created_at", "timestamp without time zone"),
+    ])
+    const spec = viewModels.mutationSpec("column.type.change")
+    const widening: string[] = []
+    spec.validate({ to_type: "bigint" }, widening, {
+      schema: "app",
+      table: "todos",
+      column: "qty",
+      model,
+    })
+    expect(widening).toEqual([])
+
+    const unsafe: string[] = []
+    spec.validate({ to_type: "text" }, unsafe, {
+      schema: "app",
+      table: "todos",
+      column: "qty",
+      model,
+    })
+    expect(unsafe.join(" ")).toContain("safe conversion")
+
+    const noTarget: string[] = []
+    spec.validate({ to_type: "bigint" }, noTarget, {
+      schema: "app",
+      table: "todos",
+      column: "created_at",
+      model,
+    })
+    expect(noTarget.join(" ")).toContain("safe conversion")
+  })
+
   it("maps every spec onto a client method and stable summaries", () => {
     const specs = viewModels.MUTATION_SPECS as Record<
       string,
@@ -378,12 +528,81 @@ describe("render mutation UI", () => {
     const actions = render.renderColumnActions(unexposed, title)
     expect(actions).toContain("Rename")
     expect(actions).toContain("Drop")
-    expect(actions).toContain("Change type")
+    expect(actions).not.toContain("Change type")
     expect(actions).toContain('data-column="title&lt;script&gt;"')
     const pk = { name: "todos_pkey", classification: "primary_key" }
     expect(render.renderConstraintActions(model, pk)).toBe("")
     const unique = { name: "todos_title_key", classification: "unique" }
     expect(render.renderConstraintActions(model, unique)).toContain("Drop")
+  })
+
+  it("names every row action's target in its accessible label", () => {
+    const actions = render.renderColumnActions(unexposed, model.columns[1]!)
+    expect(actions).toContain("Rename title&lt;script&gt;")
+    expect(actions).toContain("Drop title&lt;script&gt;")
+    expect(actions).toContain("Set default on title&lt;script&gt;")
+    expect(actions).toContain("Drop default on title&lt;script&gt;")
+    expect(actions).toContain("Allow null on title&lt;script&gt;")
+    const indexActions = render.renderIndexActions(unexposed, model.indexes[0]!)
+    expect(indexActions).toContain("Drop todos_title_idx")
+    const constraintActions = render.renderConstraintActions(unexposed, {
+      name: "todos_owner_fkey",
+      classification: "foreign_key",
+    })
+    expect(constraintActions).toContain("Drop todos_owner_fkey")
+  })
+
+  it("offers Change type only when the source has a safe conversion target", () => {
+    const convertible = viewModels.tableDetailModel({
+      ...fixtureSnapshot.schemas[0]!.tables[0]!,
+      columns: [
+        {
+          ordinal: 1,
+          name: "qty",
+          isNullable: true,
+          defaultExpression: null,
+          generated: "none",
+          identity: "none",
+          renderedType: "integer",
+        },
+        {
+          ordinal: 2,
+          name: "created_at",
+          isNullable: true,
+          defaultExpression: null,
+          generated: "none",
+          identity: "none",
+          renderedType: "timestamp without time zone",
+        },
+      ],
+    })
+    const qtyActions = render.renderColumnActions(
+      { ...convertible, exposed: false },
+      convertible.columns[0]!,
+    )
+    expect(qtyActions).toContain("Change type of qty")
+    const timestampActions = render.renderColumnActions(
+      { ...convertible, exposed: false },
+      convertible.columns[1]!,
+    )
+    expect(timestampActions).not.toContain("Change type")
+
+    const spec = viewModels.mutationSpec("column.type.change")
+    const html = render.renderMutationForm(
+      spec,
+      {
+        schema: "app",
+        table: "todos",
+        column: "qty",
+        model: convertible,
+      },
+      { to_type: "" },
+      "k",
+    )
+    expect(html).toContain('value="bigint"')
+    expect(html).toContain('value="numeric"')
+    expect(html).not.toContain('value="text"')
+    expect(html).not.toContain('value="timestamp"')
   })
 
   it("renders a labelled form with a readonly key, disabled apply, and confirm hint", () => {

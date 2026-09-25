@@ -122,7 +122,7 @@ describe("view-models", () => {
     ])
   })
 
-  it("classifies empty snapshots, including all-empty schemas", () => {
+  it("classifies only a schema-less snapshot as the empty overview", () => {
     expect(viewModels.isEmptySnapshot({ schemas: [], migrations: [] })).toBe(
       true,
     )
@@ -133,7 +133,7 @@ describe("view-models", () => {
         ],
         migrations: [],
       }),
-    ).toBe(true)
+    ).toBe(false)
     expect(
       viewModels.isEmptySnapshot(viewModels.summarizeSnapshot(fixtureSnapshot)),
     ).toBe(false)

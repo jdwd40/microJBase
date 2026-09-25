@@ -9,6 +9,7 @@ import {
   formatUtcDateTime,
   humanize,
 } from "./format.js"
+import { safeChangeTargets } from "./view-models.js"
 
 export function renderLogin(errorMessage) {
   const error = errorMessage
@@ -16,7 +17,7 @@ export function renderLogin(errorMessage) {
     : ""
   return `
     ${error}
-    <form id="login-form" method="post" action="/admin/">
+    <form id="login-form">
       <div class="field">
         <label for="operator-token">Operator token</label>
         <input
@@ -458,6 +459,10 @@ export function renderTableActions(model) {
 /**
  * Per-column action buttons. The managed id column is lifecycle-owned, so it
  * gets none; exposed tables render no actions column at all (callers check).
+ * Every label names its column so the accessible name disambiguates the
+ * identical buttons across one table. Change type appears only when the
+ * frozen safe-conversion matrix has a target for the column's catalogue
+ * rendering.
  */
 export function renderColumnActions(model, column) {
   if (model.classification !== "operator" || model.exposed) {
@@ -468,14 +473,16 @@ export function renderColumnActions(model, column) {
   }
   const ctx = { schema: model.schema, table: model.name, column: column.name }
   const buttons = [
-    ["column.rename", "Rename"],
-    ["column.drop", "Drop", ' data-dangerous="true"'],
-    ["column.default.set", "Set default"],
-    ["column.default.drop", "Drop default"],
-    ["column.not_null.set", "Not null"],
-    ["column.nullable", "Allow null"],
-    ["column.type.change", "Change type"],
+    ["column.rename", `Rename ${column.name}`],
+    ["column.drop", `Drop ${column.name}`, ' data-dangerous="true"'],
+    ["column.default.set", `Set default on ${column.name}`],
+    ["column.default.drop", `Drop default on ${column.name}`],
+    ["column.not_null.set", `Set not null on ${column.name}`],
+    ["column.nullable", `Allow null on ${column.name}`],
   ]
+  if (safeChangeTargets(model, column.name).length > 0) {
+    buttons.push(["column.type.change", `Change type of ${column.name}`])
+  }
   return `<div class="row-actions">${buttons
     .map(([spec, label, extra]) =>
       mutationButton(spec, label, ctx, extra ?? ""),
@@ -488,7 +495,7 @@ export function renderIndexActions(model, index) {
   if (model.classification !== "operator") {
     return ""
   }
-  return mutationButton("index.drop", "Drop", {
+  return mutationButton("index.drop", `Drop ${index.name}`, {
     schema: model.schema,
     table: model.name,
     name: index.name,
@@ -510,7 +517,7 @@ export function renderConstraintActions(model, constraint) {
   ) {
     return ""
   }
-  return mutationButton("constraint.drop", "Drop", {
+  return mutationButton("constraint.drop", `Drop ${constraint.name}`, {
     schema: model.schema,
     table: model.name,
     name: constraint.name,
@@ -531,7 +538,7 @@ function fieldId() {
   return `mf-${fieldCounter}`
 }
 
-function renderField(field, values, model) {
+function renderField(field, values, ctx) {
   const id = fieldId()
   const value = values[field.name]
   const hint = field.hint
@@ -541,7 +548,9 @@ function renderField(field, values, model) {
     const placeholder = field.placeholder
       ? `<option value=""${value ? "" : " selected"}>${escapeHtml(field.placeholder)}</option>`
       : ""
-    const options = field.options
+    const optionList =
+      typeof field.options === "function" ? field.options(ctx) : field.options
+    const options = optionList
       .map(
         (option) =>
           `<option value="${escapeHtml(option)}"${value === option ? " selected" : ""}>${escapeHtml(option)}</option>`,
@@ -565,7 +574,7 @@ function renderField(field, values, model) {
     `
   }
   if (field.kind === "columnPicker" || field.kind === "uuidColumnPicker") {
-    const all = model?.columns ?? []
+    const all = ctx.model?.columns ?? []
     const columns =
       field.kind === "uuidColumnPicker"
         ? all.filter((column) => column.renderedType === "uuid")
@@ -715,9 +724,7 @@ export function renderMutationForm(spec, ctx, values, idempotencyKey) {
           <button type="button" class="button button-secondary" data-action="column-row-add">Add column</button>
         </fieldset>
       `
-      : spec.fields
-          .map((field) => renderField(field, values, ctx.model))
-          .join("")
+      : spec.fields.map((field) => renderField(field, values, ctx)).join("")
 
   return `
     <a href="#table/${encodeURIComponent(ctx.schema)}/${encodeURIComponent(ctx.table ?? "")}" class="back-link" data-action="mutation-cancel">&larr; Back to ${escapeHtml(ctx.table === undefined ? "schemas" : `${ctx.schema}.${ctx.table}`)}</a>
