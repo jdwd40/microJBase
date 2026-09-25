@@ -309,7 +309,12 @@ function fakeExposurePool(): Pool {
       // with the clauses that policy's template uses.
       const name = values?.[2]
       if (typeof name === "string" && !name.startsWith("mjb_probe_")) {
-        for (const template of ["read", "insert", "update", "delete"] as const) {
+        for (const template of [
+          "read",
+          "insert",
+          "update",
+          "delete",
+        ] as const) {
           if (name === ownershipPolicyName("items", "owner", template)) {
             const shape = ownershipPolicyTemplateShape(template)
             return {

@@ -388,12 +388,12 @@ describe("ownership probe pins search_path (JDW-29 blocker 2)", () => {
 
   // An exposure service whose admin pool resolves names through the hostile
   // schema first: the verifier and the probe both run on this pool.
-  function hostileExposure(): { service: SchemaExposureService; close: () => Promise<void> } {
+  function hostileExposure(): {
+    service: SchemaExposureService
+    close: () => Promise<void>
+  } {
     const url = new URL(adminRoleUrl())
-    url.searchParams.set(
-      "options",
-      `-c search_path=${EVIL_SCHEMA},pg_catalog`,
-    )
+    url.searchParams.set("options", `-c search_path=${EVIL_SCHEMA},pg_catalog`)
     const pool = createPool({ databaseUrl: url.toString(), maxConnections: 4 })
     return {
       service: createSchemaExposureService({
@@ -484,9 +484,10 @@ describe("ownership probe pins search_path (JDW-29 blocker 2)", () => {
       // session sees only her row even though the policy expressions were
       // verified through a hostile-search_path pool.
       await withClient(databaseUrl as string, async (client) => {
-        await client.query(`SELECT set_config('microjbase.user_id', $1, false)`, [
-          ALICE,
-        ])
+        await client.query(
+          `SELECT set_config('microjbase.user_id', $1, false)`,
+          [ALICE],
+        )
         const result = await client.query<{ title: string }>(
           `SELECT title FROM ${quoteIdentifier(APP_SCHEMA)}.${quoteIdentifier("g_genuine")} ORDER BY title`,
         )

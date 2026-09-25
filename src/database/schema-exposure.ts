@@ -720,7 +720,10 @@ export function createSchemaExposureService(
           statement += ` WITH CHECK (${comparison})`
         }
         await client.query(statement)
-        const rendered = await client.query<{ using: string | null; check: string | null }>(
+        const rendered = await client.query<{
+          using: string | null
+          check: string | null
+        }>(
           `SELECT pg_catalog.pg_get_expr(pol.polqual, pol.polrelid) AS using,
                   pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid) AS check
              FROM pg_catalog.pg_policy pol
