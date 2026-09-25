@@ -17,6 +17,7 @@ import {
   compileMarkExposed,
   compileMarkUnexposed,
   compileRevokeRuntimePrivileges,
+  compileVerifyRuntimePrivilegesRevoked,
   deterministicObjectName,
   describePlan,
   type DdlPlan,
@@ -35,7 +36,7 @@ describe("compileCreateIndex", () => {
     })
     expectStatement(
       plan,
-      'CREATE INDEX "mjb_orders_user_id_created_at_idx" ON "app"."orders" ("user_id", "created_at")',
+      'CREATE INDEX "mjb_orders_user_id_created_at_idx_67df6c30" ON "app"."orders" ("user_id", "created_at")',
     )
   })
 
@@ -115,7 +116,7 @@ describe("compileAddUniqueConstraint", () => {
     })
     expectStatement(
       plan,
-      'ALTER TABLE "app"."users" ADD CONSTRAINT "mjb_users_email_uniq" UNIQUE ("email")',
+      'ALTER TABLE "app"."users" ADD CONSTRAINT "mjb_users_email_uniq_7d6369d8" UNIQUE ("email")',
     )
   })
 })
@@ -150,7 +151,7 @@ describe("compileAddForeignKey", () => {
     })
     expectStatement(
       plan,
-      'ALTER TABLE "app"."orders" ADD CONSTRAINT "mjb_orders_user_id_fkey" ' +
+      'ALTER TABLE "app"."orders" ADD CONSTRAINT "mjb_orders_user_id_fkey_bad656d5" ' +
         'FOREIGN KEY ("user_id") REFERENCES "app"."users" ("id") ' +
         "ON UPDATE RESTRICT ON DELETE CASCADE",
     )
@@ -209,18 +210,28 @@ describe("compileAddForeignKey", () => {
 })
 
 describe("deterministicObjectName", () => {
-  it("is stable and truncates long bases with a hash", () => {
+  it("is stable and truncates long bases while retaining the digest", () => {
     const columns = Array.from({ length: 12 }, (_, i) => `column_${String(i)}`)
     const name = deterministicObjectName("idx", "table", columns)
     expect(name).toBe(deterministicObjectName("idx", "table", columns))
     expect(name.length).toBeLessThanOrEqual(63)
-    expect(name.endsWith("_idx")).toBe(false) // truncated base carries a hash suffix
+    expect(name.endsWith("_idx")).toBe(false) // truncated base carries the digest
   })
 
-  it("keeps short bases untouched", () => {
+  it("appends the identity digest to short bases", () => {
     expect(deterministicObjectName("fkey", "orders", ["user_id"])).toBe(
-      "mjb_orders_user_id_fkey",
+      "mjb_orders_user_id_fkey_bad656d5",
     )
+  })
+
+  it("disambiguates column lists that join to the same string", () => {
+    // ["a_b","c"] and ["a","b_c"] both render mjb_t_a_b_c_idx without the
+    // digest; the identity hash keeps them distinct (R5 review, JDW-23).
+    const first = deterministicObjectName("idx", "t", ["a_b", "c"])
+    const second = deterministicObjectName("idx", "t", ["a", "b_c"])
+    expect(first).not.toBe(second)
+    expect(first).toBe("mjb_t_a_b_c_idx_f568690c")
+    expect(second).toBe("mjb_t_a_b_c_idx_8c3a6c81")
   })
 })
 
@@ -272,6 +283,24 @@ describe("compileGrantRuntimePrivileges", () => {
       }),
     ).toThrow(/Invalid SQL identifier/)
   })
+
+  it("refuses a privilege token outside the runtime allowlist", () => {
+    expect(() =>
+      compileGrantRuntimePrivileges({
+        schema: "app",
+        table: "todos",
+        role: "microjbase_runtime",
+        grantSchemaUsage: false,
+        grantDelete: true,
+        columnGrants: [
+          {
+            privilege: "SELECT) ON TABLE app.todos TO PUBLIC; --" as never,
+            columns: ["title"],
+          },
+        ],
+      }),
+    ).toThrow(/not allowlisted/)
+  })
 })
 
 describe("compileRevokeRuntimePrivileges", () => {
@@ -285,6 +314,47 @@ describe("compileRevokeRuntimePrivileges", () => {
       plan,
       'REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLE "app"."todos" FROM "microjbase_runtime"',
     )
+  })
+})
+
+describe("compileVerifyRuntimePrivilegesRevoked", () => {
+  it("compiles a pg_catalog-qualified residual-privilege guard", () => {
+    const plan = compileVerifyRuntimePrivilegesRevoked({
+      schema: "app",
+      table: "todos",
+      role: "microjbase_runtime",
+    })
+    expect(plan.statements).toHaveLength(1)
+    const statement = plan.statements[0] ?? ""
+    expect(statement.startsWith("DO $microjbase$")).toBe(true)
+    expect(statement).toContain(
+      "pg_catalog.has_table_privilege('microjbase_runtime', 'app.todos', 'DELETE')",
+    )
+    expect(statement).toContain(
+      "pg_catalog.has_column_privilege('microjbase_runtime', 'app.todos', a.attname, 'SELECT')",
+    )
+    expect(statement).toContain("USING ERRCODE = '9C002'")
+    // No unqualified catalogue reference anywhere in the guard.
+    expect(statement).not.toMatch(/(?<!pg_catalog\.)\bpg_class\b/)
+    expect(statement).not.toMatch(/(?<!pg_catalog\.)\bpg_namespace\b/)
+    expect(statement).not.toMatch(/(?<!pg_catalog\.)\bpg_attribute\b/)
+  })
+
+  it("refuses internal schemas and hostile identifiers", () => {
+    expect(() =>
+      compileVerifyRuntimePrivilegesRevoked({
+        schema: "microjbase",
+        table: "todos",
+        role: "microjbase_runtime",
+      }),
+    ).toThrow(/Internal schemas/)
+    expect(() =>
+      compileVerifyRuntimePrivilegesRevoked({
+        schema: "app",
+        table: "todos",
+        role: 'runtime";drop',
+      }),
+    ).toThrow(/Invalid SQL identifier/)
   })
 })
 

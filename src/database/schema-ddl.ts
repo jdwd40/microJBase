@@ -746,10 +746,13 @@ function assertDdlName(name: string, context: string): void {
 // objects from pre-existing ones in the catalogue, and so later removal
 // commands can refuse to touch objects they did not create. Deterministic
 // names derive only from the validated table and column identifiers, so the
-// same command always compiles the same name; overlong bases are truncated
-// with a stable hash suffix instead of PostgreSQL's silent truncation. The
-// preflight guards reuse this helper so the existence probe and the
-// compiled statement can never drift apart.
+// same command always compiles the same name; a short digest of the full
+// identity (table, columns, kind) is always appended, because validated
+// identifiers may themselves contain underscores — ["a_b","c"] and
+// ["a","b_c"] would otherwise both compile to mjb_t_a_b_c_<kind> (R5 review,
+// JDW-23). Overlong bases are truncated with the digest retained instead of
+// PostgreSQL's silent truncation. The preflight guards reuse this helper so
+// the existence probe and the compiled statement can never drift apart.
 const MAX_KEY_COLUMNS = 16
 
 export function deterministicObjectName(
@@ -757,13 +760,19 @@ export function deterministicObjectName(
   table: string,
   columns: readonly string[],
 ): string {
-  const base = `mjb_${table}_${columns.join("_")}_${kind}`
-  if (base.length <= MAX_IDENTIFIER_LENGTH) {
-    return base
+  // NUL separators: validated identifiers can never contain one, so the
+  // digest input is unambiguous even when column names concatenate to the
+  // same string.
+  const digest = createHash("sha256")
+    .update(`${table}\u0000${columns.join("\u0000")}\u0000${kind}`, "utf8")
+    .digest("hex")
+    .slice(0, hashPrefixLength)
+  const readable = `mjb_${table}_${columns.join("_")}_${kind}`
+  if (readable.length + digest.length + 1 <= MAX_IDENTIFIER_LENGTH) {
+    return `${readable}_${digest}`
   }
-  const hash = createHash("sha256").update(base, "utf8").digest("hex")
-  const headLength = MAX_IDENTIFIER_LENGTH - hashPrefixLength - 1
-  return `${base.slice(0, headLength)}_${hash.slice(0, hashPrefixLength)}`
+  const headLength = MAX_IDENTIFIER_LENGTH - digest.length - 1
+  return `${readable.slice(0, headLength)}_${digest}`
 }
 
 const hashPrefixLength = 8
@@ -951,6 +960,18 @@ export interface ColumnPrivilegeGrant {
   readonly columns: readonly string[]
 }
 
+// The runtime privilege tokens have the same runtime allowlist discipline as
+// the foreign-key actions: the type pins the literal, and the compiler still
+// re-validates before rendering, so a caller that bypasses the type system
+// (a cast or a comment-style token) is refused instead of being interpolated.
+const COLUMN_PRIVILEGE_SQL: Readonly<
+  Record<ColumnPrivilegeGrant["privilege"], string>
+> = Object.freeze({
+  SELECT: "SELECT",
+  INSERT: "INSERT",
+  UPDATE: "UPDATE",
+})
+
 export interface GrantRuntimePrivilegesSpec {
   readonly schema: string
   readonly table: string
@@ -982,9 +1003,14 @@ export function compileGrantRuntimePrivileges(
     )
   }
   for (const grant of spec.columnGrants) {
+    if (!Object.hasOwn(COLUMN_PRIVILEGE_SQL, grant.privilege)) {
+      throw invalidInput(
+        `column privilege "${String(grant.privilege)}" is not allowlisted`,
+      )
+    }
     assertKeyColumns(grant.columns, `a ${grant.privilege} grant`)
     statements.push(
-      `GRANT ${grant.privilege} ${quoteColumnList(grant.columns)} ` +
+      `GRANT ${COLUMN_PRIVILEGE_SQL[grant.privilege]} ${quoteColumnList(grant.columns)} ` +
         `ON TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} TO ${quoteIdentifier(spec.role)}`,
     )
   }
@@ -1019,6 +1045,72 @@ export function compileRevokeRuntimePrivileges(
   return sealPlan({
     statements: [statement],
     description: `revoke runtime privileges on ${spec.schema}.${spec.table}`,
+  })
+}
+
+// SQLSTATE raised by the unexpose residual-privilege guard when the runtime
+// role still holds any SELECT/INSERT/UPDATE on a column or DELETE on the
+// table after the revoke. Class 9C is application-defined (same discipline
+// as STALE_SOURCE_TYPE_SQLSTATE), and DDL_ERROR_MAP translates it to a
+// conflict so the whole unexpose transaction rolls back.
+export const RESIDUAL_RUNTIME_PRIVILEGES_SQLSTATE = "9C002"
+
+export interface VerifyRuntimePrivilegesRevokedSpec {
+  readonly schema: string
+  readonly table: string
+  readonly role: string
+}
+
+/**
+ * Compile the fail-closed guard that runs AFTER the unexpose REVOKE inside
+ * the same advisory-locked transaction. A REVOKE removes only grants made
+ * by the revoker, so a privilege granted to the runtime role by a different
+ * role would survive and leave the table reachable after the registry row
+ * says unexposed; this guard re-reads the runtime role's effective
+ * privileges under the same lock and raises when anything residual remains,
+ * rolling the registry update back with it. All catalogue and privilege
+ * functions are pg_catalog-qualified (the executor pins search_path, and
+ * the guard must stay correct even if that pinning ever loosens), and the
+ * body carries no caller input beyond strictly validated, literal-quoted
+ * identifiers, exactly like the locked source-type assertion.
+ */
+export function compileVerifyRuntimePrivilegesRevoked(
+  spec: VerifyRuntimePrivilegesRevokedSpec,
+): DdlPlan {
+  assertManageableSchema(spec.schema)
+  assertDdlIdentifier(spec.table)
+  assertDdlIdentifier(spec.role)
+  const role = quoteLiteral(spec.role)
+  const qualified = quoteLiteral(`${spec.schema}.${spec.table}`)
+  const statement = `DO $microjbase$
+BEGIN
+  IF pg_catalog.has_table_privilege(${role}, ${qualified}, 'DELETE') THEN
+    RAISE EXCEPTION 'runtime role retains DELETE on the unexposed table'
+      USING ERRCODE = '${RESIDUAL_RUNTIME_PRIVILEGES_SQLSTATE}';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute a
+    JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = ${quoteLiteral(spec.schema)}
+      AND c.relname = ${quoteLiteral(spec.table)}
+      AND a.attnum > 0
+      AND NOT a.attisdropped
+      AND (
+        pg_catalog.has_column_privilege(${role}, ${qualified}, a.attname, 'SELECT')
+        OR pg_catalog.has_column_privilege(${role}, ${qualified}, a.attname, 'INSERT')
+        OR pg_catalog.has_column_privilege(${role}, ${qualified}, a.attname, 'UPDATE')
+      )
+  ) THEN
+    RAISE EXCEPTION 'runtime role retains column privileges on the unexposed table'
+      USING ERRCODE = '${RESIDUAL_RUNTIME_PRIVILEGES_SQLSTATE}';
+  END IF;
+END
+$microjbase$`
+  return sealPlan({
+    statements: [statement],
+    description: `verify runtime privileges were revoked on ${spec.schema}.${spec.table}`,
   })
 }
 
@@ -1156,6 +1248,15 @@ const DDL_ERROR_MAP: Record<
     code: "CONFLICT",
     message:
       "The column type changed after the operation was compiled; retry with a fresh key",
+    status: 409,
+  },
+  // Raised by the residual-privilege guard compiled into every unexpose
+  // plan: the runtime role still holds a privilege on the table after the
+  // revoke, so the registry must not record it as unexposed.
+  "9C002": {
+    code: "CONFLICT",
+    message:
+      "Runtime role retains privileges on the table; revoke them before unexposing",
     status: 409,
   },
 }

@@ -5,9 +5,12 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
+import pg from "pg"
+
 import type { SchemaCatalogueReader } from "../../../src/contracts/index.js"
 import {
   buildTableRegistry,
+  checkExposureRegistryWriteAccess,
   createSchemaCatalogueReader,
   createSchemaDdlExecutor,
   createSchemaExposureService,
@@ -23,7 +26,7 @@ import {
   type SchemaMutationService,
 } from "../../../src/database/index.js"
 import { applyMigrationsAndGrants, withClient } from "./bootstrap.js"
-import { quoteIdentifier } from "./helpers.js"
+import { quoteIdentifier, quoteLiteral } from "./helpers.js"
 
 const databaseUrl = process.env.INTEGRATION_DATABASE_URL
 if (!databaseUrl) {
@@ -91,6 +94,29 @@ async function dropAdminRole(admin: import("pg").Client): Promise<void> {
         EXECUTE 'REVOKE ALL ON microjbase.exposure_registry_state FROM "${ADMIN_ROLE}"';
         EXECUTE 'REVOKE USAGE ON SCHEMA microjbase FROM "${ADMIN_ROLE}"';
         EXECUTE 'DROP ROLE "${ADMIN_ROLE}"';
+      END IF;
+    END
+    $$;
+  `)
+}
+
+// A throwaway role from an interrupted run cannot be dropped while ACL
+// entries (schema USAGE, table or column grants) still reference it. Revoke
+// everything this suite may have granted, tolerating objects that no longer
+// exist, then drop. Role names here are fixed test constants.
+async function dropThrowawayRole(
+  admin: import("pg").Client,
+  role: string,
+): Promise<void> {
+  await admin.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN
+        BEGIN EXECUTE 'REVOKE ALL ON SCHEMA microjbase FROM "${role}" CASCADE'; EXCEPTION WHEN OTHERS THEN NULL; END;
+        BEGIN EXECUTE 'REVOKE ALL ON SCHEMA ${APP_SCHEMA} FROM "${role}" CASCADE'; EXCEPTION WHEN OTHERS THEN NULL; END;
+        BEGIN EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA ${APP_SCHEMA} FROM "${role}" CASCADE'; EXCEPTION WHEN OTHERS THEN NULL; END;
+        BEGIN EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA public FROM "${role}" CASCADE'; EXCEPTION WHEN OTHERS THEN NULL; END;
+        EXECUTE 'DROP ROLE "${role}"';
       END IF;
     END
     $$;
@@ -678,11 +704,10 @@ describe("idempotency and atomicity", () => {
   })
 
   it("rolls back grants and registry rows together when verification fails mid-flight", async () => {
-    // Expose while a concurrent unexpose-like revoke has removed ownership
-    // cannot happen for the owner lane; instead simulate the executor's
-    // fail-closed behaviour by exposing a table whose grants cannot apply:
-    // a table whose owner was transferred away after preflight. The
-    // preflight catches ownership first, so assert the guard.
+    // Preflight guard: ownership transferred away from the schema-admin role
+    // is refused before the executor ever runs, so nothing durable changes.
+    // (In-transaction rollback after a privilege statement lands is covered
+    // by the residual-privilege test below.)
     await withClient(adminDatabaseUrl as string, async (admin) => {
       await admin.query(
         `CREATE TABLE ${quoteIdentifier(APP_SCHEMA)}.transferred (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), title TEXT NOT NULL)`,
@@ -712,6 +737,95 @@ describe("idempotency and atomicity", () => {
     await expect(
       findExposureByTarget({ query: adminQuery }, APP_SCHEMA, "transferred"),
     ).resolves.toBeNull()
+  })
+
+  it("rolls back the revoke and the registry row when a foreign grant survives", async () => {
+    const OPERATOR_ROLE = "mjb_r5_foreign_operator"
+    await createManagedItemsTable("items3")
+    await exposure.expose({
+      idempotencyKey: "v0213-resid-expose",
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "items3",
+      alias: "items3",
+    })
+
+    // A second role grants the runtime role a column privilege through the
+    // owner's grant option. A REVOKE removes only the grants the revoker
+    // made, so the unexpose REVOKE cannot remove this one — the compiled
+    // guard must fail the whole transaction and roll the registry row back.
+    await withClient(adminDatabaseUrl as string, async (admin) => {
+      await dropThrowawayRole(admin, OPERATOR_ROLE)
+      await admin.query(
+        `CREATE ROLE ${quoteIdentifier(OPERATOR_ROLE)} WITH LOGIN PASSWORD 'mjb_r5_operator_password' NOSUPERUSER NOBYPASSRLS`,
+      )
+    })
+    try {
+      await withClient(adminRoleUrl(), async (client) => {
+        await client.query(
+          `GRANT USAGE ON SCHEMA ${quoteIdentifier(APP_SCHEMA)} TO ${quoteIdentifier(OPERATOR_ROLE)}`,
+        )
+        await client.query(
+          `GRANT SELECT (title) ON ${quoteIdentifier(APP_SCHEMA)}.${quoteIdentifier("items3")} TO ${quoteIdentifier(OPERATOR_ROLE)} WITH GRANT OPTION`,
+        )
+      })
+      const operatorUrl = ((): string => {
+        const url = new URL(adminDatabaseUrl as string)
+        url.username = OPERATOR_ROLE
+        url.password = "mjb_r5_operator_password"
+        return url.toString()
+      })()
+      await withClient(operatorUrl, async (client) => {
+        await client.query(
+          `GRANT SELECT (title) ON ${quoteIdentifier(APP_SCHEMA)}.${quoteIdentifier("items3")} TO ${quoteIdentifier(RUNTIME_ROLE)}`,
+        )
+      })
+
+      await expect(
+        exposure.unexpose({
+          idempotencyKey: "v0213-resid-unexpose",
+          actor: "operator",
+          schema: APP_SCHEMA,
+          table: "items3",
+        }),
+      ).rejects.toThrow(/retains privileges/)
+
+      // The registry row rolled back with the revoke: still exposed.
+      const row = await findExposureByTarget(
+        { query: adminQuery },
+        APP_SCHEMA,
+        "items3",
+      )
+      expect(row?.exposed).toBe(true)
+      expect(holder.get("items3")).not.toBeNull()
+
+      // The REVOKE itself rolled back too: the owner-granted DELETE and
+      // column grants are intact.
+      const privileges = await adminPool.query<{ has_delete: boolean }>(
+        `SELECT has_table_privilege($1, $2, 'DELETE') AS has_delete`,
+        [RUNTIME_ROLE, `${APP_SCHEMA}.items3`],
+      )
+      expect(privileges.rows[0]?.has_delete).toBe(true)
+
+      // Once the surviving grant is removed, the same unexpose succeeds.
+      await withClient(operatorUrl, async (client) => {
+        await client.query(
+          `REVOKE SELECT (title) ON ${quoteIdentifier(APP_SCHEMA)}.${quoteIdentifier("items3")} FROM ${quoteIdentifier(RUNTIME_ROLE)}`,
+        )
+      })
+      const outcome = await exposure.unexpose({
+        idempotencyKey: "v0213-resid-unexpose-2",
+        actor: "operator",
+        schema: APP_SCHEMA,
+        table: "items3",
+      })
+      expect(outcome.replayed).toBe(false)
+      expect(holder.get("items3")).toBeNull()
+    } finally {
+      await withClient(adminDatabaseUrl as string, async (admin) => {
+        await dropThrowawayRole(admin, OPERATOR_ROLE)
+      })
+    }
   })
 })
 
@@ -806,5 +920,254 @@ describe("atomic swap under concurrent CRUD", () => {
       schema: APP_SCHEMA,
       table: "race_b",
     })
+  })
+})
+
+describe("hostile search_path (R5 review, JDW-23)", () => {
+  const DECOY_SCHEMA = "mjb_r5_decoy"
+
+  // A forged catalogue: every relation and function the pre-fix probes
+  // referenced unqualified resolves here first when the session search_path
+  // puts the decoy schema ahead of pg_catalog. The forged rows claim the
+  // decoy tables are fully exposable (RLS forced, policy applicable, uuid id
+  // primary key), so any probe that still trusts unqualified names would
+  // expose a table the real catalogue refuses.
+  async function installDecoyCatalogue(): Promise<void> {
+    await withClient(adminDatabaseUrl as string, async (admin) => {
+      await admin.query(
+        `DROP SCHEMA IF EXISTS ${quoteIdentifier(DECOY_SCHEMA)} CASCADE`,
+      )
+      await admin.query(`CREATE SCHEMA ${quoteIdentifier(DECOY_SCHEMA)}`)
+      await admin.query(
+        `CREATE VIEW ${quoteIdentifier(DECOY_SCHEMA)}.pg_namespace AS
+           SELECT 1::oid AS oid, ${quoteLiteral(APP_SCHEMA)}::name AS nspname`,
+      )
+      await admin.query(
+        `CREATE VIEW ${quoteIdentifier(DECOY_SCHEMA)}.pg_class AS
+           SELECT 11::oid AS oid, 'decoy_target'::name AS relname,
+                  1::oid AS relnamespace, 'r'::pg_catalog.char AS relkind,
+                  true AS relrowsecurity, true AS relforcerowsecurity`,
+      )
+      await admin.query(
+        `CREATE VIEW ${quoteIdentifier(DECOY_SCHEMA)}.pg_policy AS
+           SELECT 11::oid AS polrelid, ARRAY[0::oid]::oid[] AS polroles`,
+      )
+      await admin.query(
+        `CREATE VIEW ${quoteIdentifier(DECOY_SCHEMA)}.pg_index AS
+           SELECT 11::oid AS indrelid, '1'::pg_catalog.int2vector AS indkey,
+                  true AS indisprimary`,
+      )
+      await admin.query(
+        `CREATE VIEW ${quoteIdentifier(DECOY_SCHEMA)}.pg_attribute AS
+           SELECT 11::oid AS attrelid, 'id'::name AS attname, 2950::oid AS atttypid,
+                  (-1)::int4 AS atttypmod, 1::int2 AS attnum,
+                  ''::pg_catalog.char AS attgenerated, ''::pg_catalog.char AS attidentity,
+                  false AS attisdropped
+           UNION ALL
+           SELECT 11::oid, 'title'::name, 25::oid, (-1)::int4, 2::int2,
+                  ''::pg_catalog.char, ''::pg_catalog.char, false`,
+      )
+      await admin.query(
+        `CREATE FUNCTION ${quoteIdentifier(DECOY_SCHEMA)}.format_type(oid, integer)
+           RETURNS text LANGUAGE sql AS $$ SELECT CASE WHEN $1 = 2950 THEN 'uuid' ELSE 'text' END $$`,
+      )
+      await admin.query(
+        `CREATE FUNCTION ${quoteIdentifier(DECOY_SCHEMA)}.pg_has_role(text, oid, text)
+           RETURNS boolean LANGUAGE sql AS $$ SELECT true $$`,
+      )
+      await admin.query(
+        `CREATE FUNCTION ${quoteIdentifier(DECOY_SCHEMA)}.has_table_privilege(text, text, text)
+           RETURNS boolean LANGUAGE sql AS $$ SELECT true $$`,
+      )
+      await admin.query(
+        `CREATE FUNCTION ${quoteIdentifier(DECOY_SCHEMA)}.has_sequence_privilege(text, text, text)
+           RETURNS boolean LANGUAGE sql AS $$ SELECT true $$`,
+      )
+    })
+  }
+
+  async function removeDecoyCatalogue(): Promise<void> {
+    await withClient(adminDatabaseUrl as string, async (admin) => {
+      await admin.query(
+        `DROP SCHEMA IF EXISTS ${quoteIdentifier(DECOY_SCHEMA)} CASCADE`,
+      )
+    })
+  }
+
+  /** Run fn with an exposure service whose connection resolves names
+   *  through the decoy schema first. */
+  async function withHostileSearchPath<T>(
+    fn: (service: SchemaExposureService) => Promise<T>,
+  ): Promise<T> {
+    const client = new pg.Client({ connectionString: adminRoleUrl() })
+    await client.connect()
+    try {
+      await client.query(
+        `SET search_path TO ${quoteIdentifier(DECOY_SCHEMA)}, pg_catalog`,
+      )
+      const pool: Pool = {
+        query: (text, values) => client.query(text, values),
+        connect: async () => {
+          const releasable = client as pg.Client & { release: () => void }
+          releasable.release = () => undefined
+          return releasable as unknown as pg.PoolClient
+        },
+        close: async () => undefined,
+        async [Symbol.asyncDispose]() {
+          await client.end()
+        },
+      }
+      const hostileExecutor = createSchemaDdlExecutor({
+        pool,
+        createOperationLog: (query) => createSchemaOperationLog({ query }),
+      })
+      const hostile = createSchemaExposureService({
+        pool,
+        catalogue,
+        executor: hostileExecutor,
+        adminRole: ADMIN_ROLE,
+        runtimeRole: RUNTIME_ROLE,
+        refreshRuntimeRegistry,
+      })
+      return await fn(hostile)
+    } finally {
+      await client.end()
+    }
+  }
+
+  beforeAll(async () => {
+    await installDecoyCatalogue()
+    // Real tables the forged catalogue claims are exposable.
+    await withClient(adminRoleUrl(), async (client) => {
+      const qualified = (table: string): string =>
+        `${quoteIdentifier(APP_SCHEMA)}.${quoteIdentifier(table)}`
+      await client.query(
+        `CREATE TABLE ${qualified("decoy_no_rls")} (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), title TEXT NOT NULL)`,
+      )
+      await client.query(
+        `CREATE TABLE ${qualified("decoy_no_policy")} (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), title TEXT NOT NULL)`,
+      )
+      await client.query(
+        `ALTER TABLE ${qualified("decoy_no_policy")} ENABLE ROW LEVEL SECURITY`,
+      )
+      await client.query(
+        `ALTER TABLE ${qualified("decoy_no_policy")} FORCE ROW LEVEL SECURITY`,
+      )
+      await client.query(
+        `CREATE TABLE ${qualified("decoy_text_pk")} (id TEXT PRIMARY KEY, title TEXT NOT NULL)`,
+      )
+      await client.query(
+        `ALTER TABLE ${qualified("decoy_text_pk")} ENABLE ROW LEVEL SECURITY`,
+      )
+      await client.query(
+        `ALTER TABLE ${qualified("decoy_text_pk")} FORCE ROW LEVEL SECURITY`,
+      )
+      await client.query(
+        `CREATE POLICY decoy_text_pk_p ON ${qualified("decoy_text_pk")} FOR ALL TO PUBLIC USING (true) WITH CHECK (true)`,
+      )
+    })
+  })
+
+  afterAll(async () => {
+    await removeDecoyCatalogue()
+  })
+
+  it("still verifies against the real catalogue under a hostile search_path", async () => {
+    await withHostileSearchPath(async (hostile) => {
+      // The forged catalogue claims this table is hardened; the qualified
+      // probes must consult the real one and refuse.
+      await expect(
+        hostile.expose({
+          idempotencyKey: "v0213-decoy-no-rls",
+          actor: "operator",
+          schema: APP_SCHEMA,
+          table: "decoy_no_rls",
+          alias: "decoy_no_rls",
+        }),
+      ).rejects.toThrow(/Row-level security is not enabled/)
+      await expect(
+        hostile.expose({
+          idempotencyKey: "v0213-decoy-no-policy",
+          actor: "operator",
+          schema: APP_SCHEMA,
+          table: "decoy_no_policy",
+          alias: "decoy_no_policy",
+        }),
+      ).rejects.toThrow(/policies/)
+      await expect(
+        hostile.expose({
+          idempotencyKey: "v0213-decoy-text-pk",
+          actor: "operator",
+          schema: APP_SCHEMA,
+          table: "decoy_text_pk",
+          alias: "decoy_text_pk",
+        }),
+      ).rejects.toThrow(/must be type uuid/)
+    })
+    // None of the forged exposures reached the durable registry.
+    await expect(
+      findExposureByTarget({ query: adminQuery }, APP_SCHEMA, "decoy_no_rls"),
+    ).resolves.toBeNull()
+  })
+
+  it("exposes a genuinely hardened table under a hostile search_path", async () => {
+    await createManagedItemsTable("decoy_ok")
+    await withHostileSearchPath(async (hostile) => {
+      const outcome = await hostile.expose({
+        idempotencyKey: "v0213-decoy-ok",
+        actor: "operator",
+        schema: APP_SCHEMA,
+        table: "decoy_ok",
+        alias: "decoy_ok",
+      })
+      expect(outcome.replayed).toBe(false)
+      expect(holder.get("decoy_ok")).not.toBeNull()
+    })
+    await exposure.unexpose({
+      idempotencyKey: "v0213-decoy-ok-un",
+      actor: "operator",
+      schema: APP_SCHEMA,
+      table: "decoy_ok",
+    })
+  })
+
+  it("startup registry probe ignores a hostile search_path", async () => {
+    const PROBE_ROLE = "mjb_r5_probe_victim"
+    await withClient(adminDatabaseUrl as string, async (admin) => {
+      await dropThrowawayRole(admin, PROBE_ROLE)
+      await admin.query(
+        `CREATE ROLE ${quoteIdentifier(PROBE_ROLE)} WITH LOGIN PASSWORD 'mjb_r5_probe_password' NOSUPERUSER NOBYPASSRLS`,
+      )
+      // USAGE is part of the documented probe contract for the admin lane;
+      // without it the text-form has_* privilege functions cannot resolve
+      // names in schema microjbase at all.
+      await admin.query(
+        `GRANT USAGE ON SCHEMA microjbase TO ${quoteIdentifier(PROBE_ROLE)}`,
+      )
+    })
+    try {
+      const url = new URL(adminDatabaseUrl as string)
+      url.username = PROBE_ROLE
+      url.password = "mjb_r5_probe_password"
+      const client = new pg.Client({ connectionString: url.toString() })
+      await client.connect()
+      try {
+        await client.query(
+          `SET search_path TO ${quoteIdentifier(DECOY_SCHEMA)}, pg_catalog`,
+        )
+        // The decoy has_table_privilege/has_sequence_privilege return true
+        // for anything; the qualified probe must read the real privileges
+        // and fail closed for this unprivileged role.
+        await expect(checkExposureRegistryWriteAccess(client)).rejects.toThrow(
+          /missing required privilege/,
+        )
+      } finally {
+        await client.end()
+      }
+    } finally {
+      await withClient(adminDatabaseUrl as string, async (admin) => {
+        await dropThrowawayRole(admin, PROBE_ROLE)
+      })
+    }
   })
 })

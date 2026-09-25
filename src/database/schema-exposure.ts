@@ -20,7 +20,11 @@
 //   privileges (table-level REVOKE also removes the column-level grants)
 //   and never touches schema USAGE, which sibling tables may still need.
 //   A missing ownership or privilege fails closed inside the transaction
-//   and rolls back the registry change with it.
+//   and rolls back the registry change with it; because a REVOKE only
+//   removes grants made by the revoker, a guard statement re-reads the
+//   runtime role's residual privileges inside the same transaction and
+//   raises when anything still holds, so a table can never be marked
+//   unexposed while the runtime role keeps a privilege on it.
 // - The durable registry row and the grants commit in one transaction; the
 //   in-memory runtime registry is rebuilt and atomically swapped only after
 //   the commit, so concurrent CRUD requests observe either the complete old
@@ -50,6 +54,7 @@ import {
   compileMarkExposed,
   compileMarkUnexposed,
   compileRevokeRuntimePrivileges,
+  compileVerifyRuntimePrivilegesRevoked,
   type ExecuteOptions,
   type ExecuteOutcome,
   type SchemaDdlExecutor,
@@ -126,12 +131,15 @@ type Query = <R extends pg.QueryResultRow>(
   values?: unknown[],
 ) => Promise<pg.QueryResult<R>>
 
-// ---------------------------------------------------------------------------
 // Exposure verification. These checks run on the admin lane but interrogate
 // the privileges of the runtime role, because exposure is a statement about
 // what the restricted runtime lane can do. The queries mirror the v0.1
-// startup verification with the role made explicit.
-// ---------------------------------------------------------------------------
+// startup verification with the role made explicit. Every catalogue
+// reference is schema-qualified with pg_catalog: these probes run on the
+// admin pool BEFORE the executor pins search_path, and an unqualified
+// pg_class/has_table_privilege would resolve against a hostile first
+// entry in the connection's search_path (R5 review, JDW-23), letting a
+// forged catalogue pass verification.
 
 interface ExistsRow {
   exists: boolean
@@ -147,46 +155,46 @@ interface PolicyRow {
 }
 
 const TABLE_EXISTS_SQL = `SELECT EXISTS (
-  SELECT 1 FROM pg_class c
-  JOIN pg_namespace n ON n.oid = c.relnamespace
+  SELECT 1 FROM pg_catalog.pg_class c
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'
 ) AS exists`
 
 const TABLE_RLS_SQL = `SELECT c.relrowsecurity, c.relforcerowsecurity
-  FROM pg_class c
-  JOIN pg_namespace n ON n.oid = c.relnamespace
+  FROM pg_catalog.pg_class c
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'`
 
 const POLICY_APPLICABLE_SQL = `SELECT EXISTS (
   SELECT 1
-  FROM pg_policy pol
-  JOIN pg_class c ON c.oid = pol.polrelid
-  JOIN pg_namespace n ON n.oid = c.relnamespace
+  FROM pg_catalog.pg_policy pol
+  JOIN pg_catalog.pg_class c ON c.oid = pol.polrelid
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = $1 AND c.relname = $2
   AND (
     pol.polroles = ARRAY[0]::oid[]
     OR EXISTS (
-      SELECT 1 FROM unnest(pol.polroles) AS policy_role
-      WHERE pg_has_role($3, policy_role, 'MEMBER')
+      SELECT 1 FROM pg_catalog.unnest(pol.polroles) AS policy_role
+      WHERE pg_catalog.pg_has_role($3, policy_role, 'MEMBER')
     )
   )
 ) AS applicable`
 
 const PRIMARY_KEY_SQL = `SELECT a.attname AS column_name,
-       format_type(a.atttypid, a.atttypmod) AS data_type
-  FROM pg_index i
-  JOIN pg_class c ON c.oid = i.indrelid
-  JOIN pg_namespace n ON n.oid = c.relnamespace
-  JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+       pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type
+  FROM pg_catalog.pg_index i
+  JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
   WHERE n.nspname = $1 AND c.relname = $2 AND i.indisprimary`
 
 const COLUMNS_SQL = `SELECT a.attname AS column_name,
-       format_type(a.atttypid, a.atttypmod) AS data_type,
+       pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
        a.attgenerated,
        a.attidentity
-  FROM pg_attribute a
-  JOIN pg_class c ON c.oid = a.attrelid
-  JOIN pg_namespace n ON n.oid = c.relnamespace
+  FROM pg_catalog.pg_attribute a
+  JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = $1 AND c.relname = $2
     AND a.attnum > 0 AND NOT a.attisdropped
   ORDER BY a.attnum`
@@ -268,13 +276,18 @@ export async function verifyExposureCandidate(
   for (const row of columnsResult.rows) {
     const generated = row.attgenerated !== ""
     const identity = row.attidentity !== ""
-    if (isSupportedType(row.data_type)) {
+    // Insert/update grants are restricted to supported types exactly like
+    // readable columns: a column the data contract cannot represent (for
+    // example bytea) must not receive a grant the API can never honour
+    // (R5 review, JDW-23).
+    const supported = isSupportedType(row.data_type)
+    if (supported) {
       readableColumns.push(row.column_name)
     }
-    if (!generated && !identity) {
+    if (supported && !generated && !identity) {
       insertableColumns.push(row.column_name)
     }
-    if (row.column_name !== "id" && !generated && !identity) {
+    if (supported && row.column_name !== "id" && !generated && !identity) {
       updatableColumns.push(row.column_name)
     }
   }
@@ -328,8 +341,8 @@ export async function checkExposureRegistryWriteAccess(
   for (const required of REQUIRED_EXPOSURE_REGISTRY_PRIVILEGES) {
     const functionName =
       required.kind === "table"
-        ? "has_table_privilege"
-        : "has_sequence_privilege"
+        ? "pg_catalog.has_table_privilege"
+        : "pg_catalog.has_sequence_privilege"
     const result = await client.query<{ has: boolean }>(
       `SELECT ${functionName}(current_user, $1, $2) AS has`,
       [required.name, required.privilege],
@@ -481,7 +494,11 @@ export function createSchemaExposureService(
         actor: input.actor,
         dryRun: input.dryRun,
       })
-      if (!outcome.replayed && input.dryRun !== true) {
+      // Refresh after EVERY non-dry-run success, including idempotent
+      // replays: a refresh that threw after an earlier commit is otherwise
+      // stuck until process restart, because the replay path used to skip
+      // the refresh and any new key would die in preflight.
+      if (input.dryRun !== true) {
         await deps.refreshRuntimeRegistry()
       }
       return outcome
@@ -506,6 +523,18 @@ export function createSchemaExposureService(
         table: input.table,
         role: deps.runtimeRole,
       })
+      // Fail closed inside the same transaction: a REVOKE removes only
+      // grants made by the revoker, so a privilege on this table granted
+      // to the runtime role by ANOTHER role would survive and leave the
+      // table reachable after its registry row says unexposed. The guard
+      // statement raises when any residual SELECT/INSERT/UPDATE (column
+      // level) or DELETE (table level) remains, rolling the registry row
+      // back with it.
+      const verifyPlan = compileVerifyRuntimePrivilegesRevoked({
+        schema: input.schema,
+        table: input.table,
+        role: deps.runtimeRole,
+      })
       const markPlan = compileMarkUnexposed({
         schema: input.schema,
         table: input.table,
@@ -514,14 +543,14 @@ export function createSchemaExposureService(
         schema: input.schema,
         table: input.table,
       }
-      const outcome = await execute([revokePlan, markPlan], {
+      const outcome = await execute([revokePlan, verifyPlan, markPlan], {
         idempotencyKey: input.idempotencyKey,
         commandType: "schema.exposure.unexpose",
         command,
         actor: input.actor,
         dryRun: input.dryRun,
       })
-      if (!outcome.replayed && input.dryRun !== true) {
+      if (input.dryRun !== true) {
         await deps.refreshRuntimeRegistry()
       }
       return outcome

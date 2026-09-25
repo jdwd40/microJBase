@@ -223,7 +223,7 @@ describe("index lifecycle (V02-11)", () => {
     })
     expect(createOutcome.replayed).toBe(false)
     expect(await indexNames(APP_SCHEMA, "orders")).toContain(
-      "mjb_orders_quantity_idx",
+      "mjb_orders_quantity_idx_1f905994",
     )
 
     const dropOutcome = await constraints.dropIndex({
@@ -231,11 +231,11 @@ describe("index lifecycle (V02-11)", () => {
       actor: "test",
       schema: APP_SCHEMA,
       table: "orders",
-      name: "mjb_orders_quantity_idx",
+      name: "mjb_orders_quantity_idx_1f905994",
     })
     expect(dropOutcome.replayed).toBe(false)
     expect(await indexNames(APP_SCHEMA, "orders")).not.toContain(
-      "mjb_orders_quantity_idx",
+      "mjb_orders_quantity_idx_1f905994",
     )
   })
 
@@ -409,7 +409,7 @@ describe("unique constraints (V02-11)", () => {
     })
     expect(outcome.replayed).toBe(false)
     expect(await constraintNames(APP_SCHEMA, "orders")).toContain(
-      "mjb_orders_user_ref_quantity_uniq",
+      "mjb_orders_user_ref_quantity_uniq_81e3bf65",
     )
 
     await constraints.dropConstraint({
@@ -417,10 +417,10 @@ describe("unique constraints (V02-11)", () => {
       actor: "test",
       schema: APP_SCHEMA,
       table: "orders",
-      name: "mjb_orders_user_ref_quantity_uniq",
+      name: "mjb_orders_user_ref_quantity_uniq_81e3bf65",
     })
     expect(await constraintNames(APP_SCHEMA, "orders")).not.toContain(
-      "mjb_orders_user_ref_quantity_uniq",
+      "mjb_orders_user_ref_quantity_uniq_81e3bf65",
     )
   })
 
@@ -464,7 +464,7 @@ describe("foreign keys (V02-12)", () => {
 
     const catalogued = await readCatalogueTable(APP_SCHEMA, "orders")
     const fk = catalogued?.constraints.find(
-      (constraint) => constraint.name === "mjb_orders_user_ref_fkey",
+      (constraint) => constraint.name === "mjb_orders_user_ref_fkey_eb0f8fd3",
     )
     expect(fk?.classification).toBe("foreign_key")
     expect(fk?.references).toEqual({
@@ -480,10 +480,10 @@ describe("foreign keys (V02-12)", () => {
       actor: "test",
       schema: APP_SCHEMA,
       table: "orders",
-      name: "mjb_orders_user_ref_fkey",
+      name: "mjb_orders_user_ref_fkey_eb0f8fd3",
     })
     expect(await constraintNames(APP_SCHEMA, "orders")).not.toContain(
-      "mjb_orders_user_ref_fkey",
+      "mjb_orders_user_ref_fkey_eb0f8fd3",
     )
   })
 
@@ -532,7 +532,7 @@ describe("foreign keys (V02-12)", () => {
       actor: "test",
       schema: APP_SCHEMA,
       table: "orders",
-      name: "mjb_orders_user_ref_fkey",
+      name: "mjb_orders_user_ref_fkey_eb0f8fd3",
     })
   })
 
@@ -692,7 +692,7 @@ describe("foreign keys (V02-12)", () => {
       actor: "test",
       schema: APP_SCHEMA,
       table: "orders",
-      name: "mjb_orders_user_ref_fkey",
+      name: "mjb_orders_user_ref_fkey_eb0f8fd3",
     })
   })
 })

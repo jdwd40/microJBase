@@ -254,6 +254,130 @@ describe("one-time import semantics", () => {
       },
     ])
   })
+
+  it("racing imports with identical payloads proceed exactly once", async () => {
+    await resetRegistry()
+    const outcomes = await Promise.allSettled([
+      importInitialExposure({ query: runtimeQueryFn }, [
+        { alias: "todos", schema: APP_SCHEMA, table: "todos" },
+      ]),
+      importInitialExposure({ query: runtimeQueryFn }, [
+        { alias: "todos", schema: APP_SCHEMA, table: "todos" },
+      ]),
+    ])
+    // Whoever reads the initialized guard first may take the pre-check
+    // conflict path; at least one import must have committed the set.
+    expect(outcomes.some((o) => o.status === "fulfilled")).toBe(true)
+    const state = await readExposureRegistryState({ query: runtimeQueryFn })
+    expect(state.exposed).toEqual([
+      { alias: "todos", schema: APP_SCHEMA, table: "todos" },
+    ])
+  })
+
+  it("a racing import with a different payload is never installed", async () => {
+    await resetRegistry()
+    const outcomes = await Promise.allSettled([
+      importInitialExposure({ query: runtimeQueryFn }, [
+        { alias: "todos", schema: APP_SCHEMA, table: "todos" },
+      ]),
+      importInitialExposure({ query: runtimeQueryFn }, [
+        { alias: "notes", schema: APP_SCHEMA, table: "notes" },
+      ]),
+    ])
+    const fulfilled = outcomes.filter((o) => o.status === "fulfilled")
+    const rejected = outcomes.filter((o) => o.status === "rejected")
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    // The loser either observed the guard before calling or re-read the
+    // winner's mismatched set; neither path installs the loser's payload.
+    expect(String((rejected[0] as PromiseRejectedResult).reason)).toMatch(
+      /different mapping set|already initialized/,
+    )
+    const state = await readExposureRegistryState({ query: runtimeQueryFn })
+    expect(state.exposed).toHaveLength(1)
+  })
+})
+
+describe("PUBLIC EXECUTE revocation (migration 0007)", () => {
+  const VICTIM_ROLE = "mjb_r5_revoke_check"
+  const victimUrl = ((): string => {
+    const url = new URL(databaseUrl as string)
+    url.username = VICTIM_ROLE
+    url.password = "mjb_r5_victim_password"
+    return url.toString()
+  })()
+
+  it("denies the one-time import to a role holding only CONNECT and schema USAGE", async () => {
+    // Revoke-before-drop: the EXECUTE and schema-USAGE ACL entries depend
+    // on the role, so a leftover role from an interrupted run cannot be
+    // dropped until those grants are removed first.
+    await withClient(adminDatabaseUrl as string, async (admin) => {
+      await admin.query(`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${VICTIM_ROLE}') THEN
+            EXECUTE 'REVOKE ALL ON FUNCTION microjbase.import_exposure_registry(JSONB) FROM "${VICTIM_ROLE}"';
+            EXECUTE 'REVOKE ALL ON SCHEMA microjbase FROM "${VICTIM_ROLE}"';
+            EXECUTE 'DROP ROLE "${VICTIM_ROLE}"';
+          END IF;
+        END
+        $$;
+      `)
+      await admin.query(
+        `CREATE ROLE ${quoteIdentifier(VICTIM_ROLE)} WITH LOGIN PASSWORD 'mjb_r5_victim_password' NOSUPERUSER NOBYPASSRLS`,
+      )
+      await admin.query(
+        `GRANT USAGE ON SCHEMA microjbase TO ${quoteIdentifier(VICTIM_ROLE)}`,
+      )
+    })
+    try {
+      // Before migration 0007 the default function ACL left EXECUTE granted
+      // to PUBLIC, so this call succeeded and let any login role choose the
+      // exposure set. It must now fail closed.
+      await expect(
+        withClient(victimUrl, async (client) => {
+          await client.query("SELECT microjbase.import_exposure_registry('[]')")
+        }),
+      ).rejects.toThrow(
+        /permission denied for function import_exposure_registry/,
+      )
+
+      // With the documented out-of-band EXECUTE grant the same call is
+      // accepted past the permission check — the function itself then
+      // raises the one-time guard, which proves EXECUTE was granted
+      // without leaving the committed import behind. Roll the transaction
+      // back so the registry state stays untouched for the other suites.
+      await withClient(adminDatabaseUrl as string, async (admin) => {
+        await admin.query(
+          `GRANT EXECUTE ON FUNCTION microjbase.import_exposure_registry(JSONB) TO ${quoteIdentifier(VICTIM_ROLE)}`,
+        )
+      })
+      await withClient(victimUrl, async (client) => {
+        await client.query("BEGIN")
+        try {
+          await expect(
+            client.query("SELECT microjbase.import_exposure_registry('[]')"),
+          ).rejects.toThrow(/exposure registry is already initialized/)
+        } finally {
+          await client.query("ROLLBACK")
+        }
+      })
+    } finally {
+      await withClient(adminDatabaseUrl as string, async (admin) => {
+        await admin.query(`
+          DO $$
+          BEGIN
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${VICTIM_ROLE}') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION microjbase.import_exposure_registry(JSONB) FROM "${VICTIM_ROLE}"';
+              EXECUTE 'REVOKE ALL ON SCHEMA microjbase FROM "${VICTIM_ROLE}"';
+              EXECUTE 'DROP ROLE "${VICTIM_ROLE}"';
+            END IF;
+          END
+          $$;
+        `)
+      })
+    }
+  })
 })
 
 describe("v0.1 upgrade path", () => {

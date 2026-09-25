@@ -22,6 +22,12 @@ interface FakeRegistry {
   failNextImport: boolean
   /** When the import fails, simulate a concurrent winner initializing. */
   winOnFailure: boolean
+  /**
+   * What the simulated winner imported; defaults to the caller's own
+   * payload (an identical concurrent import). A different array models a
+   * conflicting winner.
+   */
+  winnerRows?: { alias: string; schema: string; table: string }[]
 }
 
 function createFake(fake: FakeRegistry) {
@@ -36,12 +42,13 @@ function createFake(fake: FakeRegistry) {
       if (fake.failNextImport) {
         fake.failNextImport = false
         if (fake.winOnFailure) {
-          fake.rows.push({
-            alias: "winner",
-            schema: "public",
-            table: "winner",
-            exposed: true,
-          })
+          const payload = JSON.parse(values[0] as string) as {
+            alias: string
+            schema: string
+            table: string
+          }[]
+          const winnerRows = fake.winnerRows ?? payload
+          fake.rows.push(...winnerRows.map((m) => ({ ...m, exposed: true })))
           fake.initialized = true
           fake.importedAt = new Date()
         }
@@ -288,7 +295,7 @@ describe("importInitialExposure", () => {
     expect(fake.rows).toHaveLength(1)
   })
 
-  it("returns the winner state when another process initialized first", async () => {
+  it("returns the winner state when another process initialized first with the same set", async () => {
     const fake: FakeRegistry = {
       initialized: false,
       importedAt: null,
@@ -302,8 +309,41 @@ describe("importInitialExposure", () => {
     ])
     expect(state.initialized).toBe(true)
     expect(state.exposed).toEqual([
-      { alias: "winner", schema: "public", table: "winner" },
+      { alias: "todos", schema: "public", table: "todos" },
     ])
+  })
+
+  it("conflicts when the concurrent winner initialized a different set", async () => {
+    const fake: FakeRegistry = {
+      initialized: false,
+      importedAt: null,
+      rows: [],
+      failNextImport: true,
+      winOnFailure: true,
+      winnerRows: [{ alias: "stolen", schema: "app", table: "secrets" }],
+    }
+    const { query } = createFake(fake)
+    await expect(
+      importInitialExposure({ query }, [mapping("todos", "public", "todos")]),
+    ).rejects.toThrow(/initialized concurrently with a different mapping set/)
+  })
+
+  it("conflicts when the winner's set only differs by an extra mapping", async () => {
+    const fake: FakeRegistry = {
+      initialized: false,
+      importedAt: null,
+      rows: [],
+      failNextImport: true,
+      winOnFailure: true,
+      winnerRows: [
+        { alias: "todos", schema: "public", table: "todos" },
+        { alias: "extra", schema: "public", table: "extra" },
+      ],
+    }
+    const { query } = createFake(fake)
+    await expect(
+      importInitialExposure({ query }, [mapping("todos", "public", "todos")]),
+    ).rejects.toThrow(/different mapping set/)
   })
 
   it("propagates a translated error when the import genuinely failed", async () => {

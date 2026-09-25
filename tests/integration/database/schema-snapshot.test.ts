@@ -44,6 +44,7 @@ const APPLIED_MIGRATIONS = [
   "0004_todos_table.sql",
   "0005_schema_operations.sql",
   "0006_exposure_registry.sql",
+  "0007_exposure_registry_revoke_public.sql",
 ] as const
 
 async function withAdminClient<T>(fn: (client: pg.Client) => Promise<T>) {

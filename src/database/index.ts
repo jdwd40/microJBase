@@ -161,6 +161,7 @@ export {
   compileMarkExposed,
   compileMarkUnexposed,
   compileRevokeRuntimePrivileges,
+  compileVerifyRuntimePrivilegesRevoked,
   deterministicObjectName,
   type AddForeignKeySpec,
   type AddUniqueConstraintSpec,
