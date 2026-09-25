@@ -11,6 +11,8 @@ import {
   E2E_DATABASE_NAME,
   E2E_RUNTIME_PASSWORD,
   E2E_RUNTIME_ROLE,
+  E2E_SCHEMA_ADMIN_PASSWORD,
+  E2E_SCHEMA_ADMIN_ROLE,
   adminE2EDatabaseUrl,
   adminMaintenanceUrl,
 } from "./config.js"
@@ -48,6 +50,54 @@ export async function ensureRuntimeRole(): Promise<void> {
       ALTER ROLE ${E2E_RUNTIME_ROLE}
         WITH LOGIN NOSUPERUSER NOBYPASSRLS
         PASSWORD '${E2E_RUNTIME_PASSWORD}';
+    `)
+  })
+}
+
+/**
+ * Ensure the dedicated E2E schema-admin role exists with exactly the
+ * attributes the fail-closed capability check requires (D-024): a
+ * non-superuser, non-BYPASSRLS role without role-management rights. The
+ * out-of-band history/registry grants mirror the operator procedure
+ * documented for migrations 0005/0006 (D-025/D-028).
+ */
+export async function ensureSchemaAdminRole(): Promise<void> {
+  await withClient(adminMaintenanceUrl(), async (client) => {
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${E2E_SCHEMA_ADMIN_ROLE}') THEN
+          CREATE ROLE ${E2E_SCHEMA_ADMIN_ROLE} LOGIN;
+        END IF;
+      END
+      $$;
+    `)
+    await client.query(`
+      ALTER ROLE ${E2E_SCHEMA_ADMIN_ROLE}
+        WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE
+        PASSWORD '${E2E_SCHEMA_ADMIN_PASSWORD}';
+    `)
+  })
+}
+
+/**
+ * Grant the schema-admin role the out-of-band admin-lane privileges and
+ * create its dedicated operator schema. The schema is owned by the admin
+ * role so create/alter commands leave ownership there (D-011), and the
+ * migration-history read is what the deterministic snapshot (V02-03) reads
+ * through the admin lane.
+ */
+export async function grantSchemaAdminPrivileges(): Promise<void> {
+  await withClient(adminE2EDatabaseUrl(), async (client) => {
+    await client.query(`
+      GRANT USAGE ON SCHEMA microjbase TO ${E2E_SCHEMA_ADMIN_ROLE};
+      GRANT SELECT ON microjbase.schema_migrations TO ${E2E_SCHEMA_ADMIN_ROLE};
+      GRANT SELECT, INSERT, UPDATE ON microjbase.schema_operations TO ${E2E_SCHEMA_ADMIN_ROLE};
+      GRANT USAGE ON SEQUENCE microjbase.schema_operations_id_seq TO ${E2E_SCHEMA_ADMIN_ROLE};
+      GRANT SELECT, INSERT, UPDATE ON microjbase.exposure_registry TO ${E2E_SCHEMA_ADMIN_ROLE};
+      GRANT USAGE ON SEQUENCE microjbase.exposure_registry_id_seq TO ${E2E_SCHEMA_ADMIN_ROLE};
+      GRANT SELECT ON microjbase.exposure_registry_state TO ${E2E_SCHEMA_ADMIN_ROLE};
+      CREATE SCHEMA IF NOT EXISTS e2e_admin AUTHORIZATION ${E2E_SCHEMA_ADMIN_ROLE};
     `)
   })
 }
@@ -105,7 +155,9 @@ export async function adminQuery<
 /** Full per-test-file lifecycle: fresh DB, real migrations, runtime grants. */
 export async function provisionDatabase(): Promise<void> {
   await ensureRuntimeRole()
+  await ensureSchemaAdminRole()
   await resetDatabase()
   await applyMigrations()
   await grantRuntimePrivileges()
+  await grantSchemaAdminPrivileges()
 }

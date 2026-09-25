@@ -15,6 +15,7 @@ import type { AuthService } from "../contracts/index.js"
 import type { DataService } from "../data/index.js"
 import type { Pool } from "../database/index.js"
 
+import { type AdminDependencies, registerAdminRoutes } from "./admin-routes.js"
 import { registerAuthRoutes } from "./auth-routes.js"
 import { registerDataRoutes } from "./data-routes.js"
 import { registerHealthRoute } from "./health.js"
@@ -38,11 +39,27 @@ export interface ServerDependencies {
   authService: AuthService
   dataService: DataService
   pool?: Pool
+  /**
+   * Composed admin-lane surface. Present only when both admin settings are
+   * configured (D-012); when absent the /v1/admin route tree is not
+   * registered at all and those paths fall through to the 404 handler. The
+   * rate limiter is owned by the server so the instance is per-process.
+   */
+  admin?: Omit<AdminDependencies, "rateLimiter">
 }
 
-/** True for request paths under /v1/auth/ (and the bare /v1/auth prefix). */
-function isAuthPath(url: string): boolean {
-  return url === "/v1/auth" || url.startsWith("/v1/auth/")
+/**
+ * True for request paths under /v1/auth/ or /v1/admin/ (and the bare
+ * prefixes). Both trees require Cache-Control: no-store on every response,
+ * including Fastify pre-route failures that never reach a handler.
+ */
+function isNoStorePath(url: string): boolean {
+  return (
+    url === "/v1/auth" ||
+    url.startsWith("/v1/auth/") ||
+    url === "/v1/admin" ||
+    url.startsWith("/v1/admin/")
+  )
 }
 
 export async function buildServer(
@@ -65,10 +82,11 @@ export async function buildServer(
 
   app.addHook("onSend", async (request, reply, payload) => {
     reply.header("x-request-id", reply.request.id)
-    // api-spec requires Cache-Control: no-store on every auth response,
-    // including Fastify pre-route failures (malformed JSON, oversized or
-    // empty bodies) that never reach the auth route handlers' sendNoCache.
-    if (isAuthPath(request.url)) {
+    // api-spec requires Cache-Control: no-store on every auth response; the
+    // admin tree (V02-16) requires the same, including Fastify pre-route
+    // failures (malformed JSON, oversized or empty bodies) that never reach
+    // the route handlers.
+    if (isNoStorePath(request.url)) {
       reply.header("cache-control", "no-store")
     }
     return payload
@@ -167,6 +185,22 @@ function registerRoutes(
       dataService: deps.dataService,
     }),
   )
+
+  if (deps.admin !== undefined) {
+    // Separate bounded limiter instance for the admin tree: admin traffic is
+    // never counted against (nor starved by) the auth limiter and vice
+    // versa.
+    const adminRateLimiter = new InMemoryRateLimiter({
+      attemptsPerWindow: 30,
+      windowMs: 60_000,
+    })
+    promises.push(
+      registerAdminRoutes(app, {
+        ...deps.admin,
+        rateLimiter: adminRateLimiter,
+      }),
+    )
+  }
 
   return Promise.all(promises).then(() => undefined)
 }

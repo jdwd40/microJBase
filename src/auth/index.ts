@@ -1,5 +1,10 @@
 // Public entry point for the auth domain module.
 
+export {
+  decodeAdminTokenDigest,
+  hashOperatorToken,
+  verifyOperatorToken,
+} from "./admin-token.js"
 export { AuthError, isAppErrorLike } from "./errors.js"
 export { normaliseEmail } from "./email.js"
 export {

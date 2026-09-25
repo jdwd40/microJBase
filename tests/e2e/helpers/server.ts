@@ -12,8 +12,10 @@ import {
   E2E_TABLES,
   REPO_ROOT,
   adminMaintenanceUrl,
+  adminTokenDigestHex,
   assertBuildFresh,
   runtimeDatabaseUrl,
+  schemaAdminDatabaseUrl,
 } from "./config.js"
 
 function postgresPort(): number {
@@ -60,6 +62,11 @@ export interface ServerOptions {
   sessionTtlSeconds?: number
   maxBodyBytes?: number
   logLevel?: string
+  /**
+   * Wire the opt-in admin lane (V02-16): SCHEMA_DATABASE_URL as the E2E
+   * schema-admin role plus the digest of the E2E operator token.
+   */
+  admin?: boolean
 }
 
 /** Spawn the compiled server against the provisioned E2E database. */
@@ -85,6 +92,12 @@ export async function spawnServer(
         : {}),
       ...(options.maxBodyBytes !== undefined
         ? { MAX_BODY_BYTES: String(options.maxBodyBytes) }
+        : {}),
+      ...(options.admin === true
+        ? {
+            SCHEMA_DATABASE_URL: schemaAdminDatabaseUrl(postgresPort()),
+            MICROJBASE_ADMIN_TOKEN_SHA256: adminTokenDigestHex(),
+          }
         : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],

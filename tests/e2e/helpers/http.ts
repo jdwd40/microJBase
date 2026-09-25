@@ -16,6 +16,12 @@ export interface ApiResponse {
 export interface ApiClient {
   get(path: string, token?: string): Promise<ApiResponse>
   post(path: string, json: unknown, token?: string): Promise<ApiResponse>
+  /** POST with extra headers (the admin mutation API requires Idempotency-Key). */
+  postWithHeaders(
+    path: string,
+    json: unknown,
+    headers: Record<string, string>,
+  ): Promise<ApiResponse>
   patch(path: string, json: unknown, token?: string): Promise<ApiResponse>
   del(path: string, token?: string): Promise<ApiResponse>
   /** Send a raw, already-serialized body with an explicit content type. */
@@ -70,6 +76,11 @@ export function createApi(baseUrl: string): ApiClient {
     get: (path, token) => send("GET", path, undefined, jsonHeaders(token)),
     post: (path, json, token) =>
       send("POST", path, JSON.stringify(json), jsonHeaders(token, true)),
+    postWithHeaders: (path, json, headers) =>
+      send("POST", path, JSON.stringify(json), {
+        "content-type": "application/json",
+        ...headers,
+      }),
     patch: (path, json, token) =>
       send("PATCH", path, JSON.stringify(json), jsonHeaders(token, true)),
     del: (path, token) => send("DELETE", path, undefined, jsonHeaders(token)),

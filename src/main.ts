@@ -12,6 +12,7 @@ import { pathToFileURL } from "node:url"
 
 import type { FastifyInstance } from "fastify"
 
+import { createAuthService, decodeAdminTokenDigest } from "./auth/index.js"
 import type { TableRegistry } from "./contracts/index.js"
 import {
   AppError,
@@ -19,7 +20,6 @@ import {
   parseConfig,
   safeConfigForLogging,
 } from "./core/index.js"
-import { createAuthService } from "./auth/index.js"
 import { createDataService } from "./data/index.js"
 import {
   assertSchemaAdminSessionDistinct,
@@ -35,18 +35,23 @@ import {
   createPostgresDataRepository,
   createSchemaAdminPool,
   createSchemaCatalogueReader,
+  createSchemaConstraintService,
   createSchemaDdlExecutor,
   createSchemaExposureService,
+  createSchemaMutationService,
   createSchemaOperationLog,
   createSchemaPolicyService,
   createSchemaRlsService,
+  createSchemaSnapshotReader,
   createTransactionRunner,
   createSwappableTableRegistry,
   buildTableRegistry,
   importInitialExposure,
   readExposureRegistryState,
   type Pool,
+  type SchemaConstraintService,
   type SchemaExposureService,
+  type SchemaMutationService,
   type SchemaPolicyService,
   type SchemaRlsService,
   type SwappableTableRegistry,
@@ -65,6 +70,8 @@ interface StartedServer {
     exposure: SchemaExposureService
     rls: SchemaRlsService
     policies: SchemaPolicyService
+    mutation: SchemaMutationService
+    constraints: SchemaConstraintService
   } | null
 }
 
@@ -166,8 +173,10 @@ export async function start(): Promise<StartedServer> {
 
     let admin: StartedServer["admin"] = null
     if (adminPool) {
+      const adminQuery: Pool["query"] = (text, values) =>
+        adminPool.query(text, values)
       const adminCatalogue = createSchemaCatalogueReader({
-        query: (text, values) => adminPool.query(text, values),
+        query: adminQuery,
       })
       const adminExecutor = createSchemaDdlExecutor({
         pool: adminPool,
@@ -198,6 +207,19 @@ export async function start(): Promise<StartedServer> {
           runtimeRole,
           executor: adminExecutor,
         }),
+        mutation: createSchemaMutationService({
+          pool: adminPool,
+          catalogue: adminCatalogue,
+          registry,
+          adminRole,
+          executor: adminExecutor,
+        }),
+        constraints: createSchemaConstraintService({
+          pool: adminPool,
+          catalogue: adminCatalogue,
+          adminRole,
+          executor: adminExecutor,
+        }),
       }
     }
 
@@ -212,14 +234,52 @@ export async function start(): Promise<StartedServer> {
     })
     const dataService = createDataService(registry, dataRepository)
 
-    const app = await buildHttpServer(
-      { authService, dataService, pool },
-      {
-        trustProxy: config.trustProxy,
-        maxBodyBytes: config.maxBodyBytes,
-        logLevel: config.logLevel,
-      },
-    )
+    // V02-16..18: the opt-in admin tree is composed only when the admin lane
+    // exists. The route registration is skipped entirely otherwise, so a
+    // disabled admin lane leaves no /v1/admin fingerprint.
+    let adminRoutes: ServerDependencies["admin"]
+    if (adminPool && admin && config.adminTokenSha256) {
+      const tokenDigest = decodeAdminTokenDigest(config.adminTokenSha256)
+      if (tokenDigest === null) {
+        // parseConfig already enforces the hex shape; this is defense in
+        // depth and can never happen with a validated config.
+        throw new AppError(
+          "VALIDATION_ERROR",
+          "MICROJBASE_ADMIN_TOKEN_SHA256 must be a 64-character lowercase SHA-256 hex digest",
+          400,
+          { variable: "MICROJBASE_ADMIN_TOKEN_SHA256" },
+        )
+      }
+      adminRoutes = {
+        tokenDigest,
+        pool: adminPool,
+        snapshot: createSchemaSnapshotReader({
+          query: (text, values) => adminPool.query(text, values),
+          registry,
+        }),
+        history: createSchemaOperationLog({
+          query: (text, values) => adminPool.query(text, values),
+        }),
+        mutation: admin.mutation,
+        constraints: admin.constraints,
+        exposure: admin.exposure,
+        rls: admin.rls,
+        policies: admin.policies,
+      }
+    }
+
+    const httpDeps: ServerDependencies = {
+      authService,
+      dataService,
+      pool,
+      ...(adminRoutes === undefined ? {} : { admin: adminRoutes }),
+    }
+
+    const app = await buildHttpServer(httpDeps, {
+      trustProxy: config.trustProxy,
+      maxBodyBytes: config.maxBodyBytes,
+      logLevel: config.logLevel,
+    })
 
     await app.listen({ host: config.host, port: config.port })
 
