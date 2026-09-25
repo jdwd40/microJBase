@@ -296,6 +296,28 @@ describe("admin route tree isolation (V02-16)", () => {
     expect(missing.headers["cache-control"]).toBe("no-store")
     await app.close()
   })
+
+  it("marks admin paths with a query string no-store too", async () => {
+    const services = fakeAdminServices()
+    const app = await buildAdminServer(services)
+
+    // request.url includes the query string; both the bare 404 tree and
+    // real routes under it must still carry no-store (JDW-34 minor 1).
+    const barePrefix = await app.inject({
+      method: "GET",
+      url: "/v1/admin?x=1",
+    })
+    expect(barePrefix.statusCode).toBe(404)
+    expect(barePrefix.headers["cache-control"]).toBe("no-store")
+
+    const withQuery = await app.inject({
+      method: "GET",
+      url: "/v1/admin/schema/capabilities?probe=1",
+    })
+    expect(withQuery.statusCode).toBe(401)
+    expect(withQuery.headers["cache-control"]).toBe("no-store")
+    await app.close()
+  })
 })
 
 describe("operator authentication (V02-16)", () => {
@@ -610,6 +632,35 @@ describe("mutating admin endpoints (V02-18)", () => {
           },
         ],
         rogue: true,
+      },
+    })
+    expect(response.statusCode).toBe(400)
+    expect(response.json().error.code).toBe("VALIDATION_ERROR")
+    expect(services.mutationCalls.length).toBe(0)
+    await app.close()
+  })
+
+  it("rejects a value field on a non-literal column default", async () => {
+    const services = fakeAdminServices()
+    const app = await buildAdminServer(services)
+    // `value` exists only on kind "literal"; on "none" it is an unknown
+    // field, so two different bodies can never compile to one command
+    // (JDW-34 minor 3).
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/admin/schema/tables",
+      headers: { ...operatorAuth, "idempotency-key": "unit-key-none-value" },
+      payload: {
+        schema: "public",
+        table: "todos",
+        columns: [
+          {
+            name: "title",
+            type: "text",
+            nullable: true,
+            default: { kind: "none", value: "sneaky" },
+          },
+        ],
       },
     })
     expect(response.statusCode).toBe(400)

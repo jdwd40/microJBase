@@ -164,6 +164,32 @@ export async function readMigrationHistory(
 }
 
 /**
+ * Startup probe for the D-037.6 grant: the admin lane reads migration
+ * history through MIGRATION_HISTORY_SQL, so the schema-admin role must hold
+ * SELECT on microjbase.schema_migrations. Migrations 0005/0006 could not
+ * grant it (the role did not exist at migration time), so the operator
+ * grants it out of band; probe here and fail startup with a clear message
+ * rather than letting the first snapshot read die later as a 500.
+ */
+export async function checkSchemaMigrationsReadAccess(
+  client: pg.Client | pg.PoolClient,
+): Promise<void> {
+  const result = await client.query<{ has: boolean }>(
+    "SELECT has_table_privilege(current_user, $1, $2) AS has",
+    ["microjbase.schema_migrations", "SELECT"],
+  )
+  const row = result.rows[0]
+  if (row === undefined || !row.has) {
+    throw new AppError(
+      "DATABASE_UNAVAILABLE",
+      "Schema-admin database role is missing required privilege SELECT on microjbase.schema_migrations",
+      503,
+      { object: "microjbase.schema_migrations", privilege: "SELECT" },
+    )
+  }
+}
+
+/**
  * Assemble the immutable snapshot. Exposure targets must exist in the
  * catalogue and must never be internal; both violations fail closed with
  * INTERNAL_ERROR rather than being silently normalized or dropped.

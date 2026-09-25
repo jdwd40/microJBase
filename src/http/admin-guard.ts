@@ -303,8 +303,10 @@ export function mapColumnDefault(
     })
   }
   const spec = value as Record<string, unknown>
-  rejectUnknownFields(spec, ["kind", "value"])
   const kind = requireEnumField(spec, "kind", DEFAULT_KINDS)
+  // `value` exists only on the literal kind; every other kind rejects it so
+  // two different bodies can never compile to the same command.
+  rejectUnknownFields(spec, kind === "literal" ? ["kind", "value"] : ["kind"])
   switch (kind) {
     case "none":
     case "current_timestamp":

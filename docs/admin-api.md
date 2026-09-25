@@ -33,7 +33,11 @@ traces, or database internals.
 Rate limiting is separate from the auth limiter: a dedicated bounded
 fixed-window limiter (30 attempts per endpoint per client IP per 60-second
 window) protects the whole tree. Over-limit responses are
-`429 RATE_LIMITED` with `Retry-After`.
+`429 RATE_LIMITED` with `Retry-After`. The per-client-IP key resolves the
+same way as every other client IP in the server: with `TRUST_PROXY`
+enabled the address comes from `X-Forwarded-For`, so it is spoofable by
+clients unless the proxy overwrites that header. The default `TRUST_PROXY`
+is `false`.
 
 ## Operator prerequisites
 

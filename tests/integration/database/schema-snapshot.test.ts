@@ -2,6 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import pg from "pg"
 
 import {
+  checkSchemaMigrationsReadAccess,
+  createPool,
   createSchemaSnapshotReader,
   readMigrationHistory,
   type SchemaCatalogueDependencies,
@@ -253,5 +255,70 @@ describe("schema snapshot (real PostgreSQL)", () => {
     const after = await captureState()
 
     expect(after).toEqual(before)
+  })
+
+  it("checkSchemaMigrationsReadAccess resolves for the schema-admin role", async () => {
+    await withAdminClient(async (admin) => {
+      await expect(
+        checkSchemaMigrationsReadAccess(admin),
+      ).resolves.toBeUndefined()
+    })
+  })
+
+  it("checkSchemaMigrationsReadAccess fails closed for a role without the SELECT grant", async () => {
+    const NO_SELECT_ROLE = "mjb_snapshot_noselect"
+    await withAdminClient(async (admin) => {
+      // The role may survive a previous interrupted run holding its schema
+      // grant, which blocks DROP ROLE until revoked.
+      await admin.query(
+        `DO $do$
+           BEGIN
+             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${NO_SELECT_ROLE}') THEN
+               EXECUTE format('REVOKE ALL ON SCHEMA microjbase FROM %I', '${NO_SELECT_ROLE}');
+               EXECUTE format('DROP ROLE %I', '${NO_SELECT_ROLE}');
+             END IF;
+           END
+         $do$`,
+      )
+      await admin.query(
+        `CREATE ROLE ${quoteIdent(NO_SELECT_ROLE)} WITH LOGIN PASSWORD 'noselect_password' NOSUPERUSER NOBYPASSRLS NOCREATEROLE`,
+      )
+      // A real admin lane always holds USAGE on the microjbase schema; the
+      // probe targets the table grant only.
+      await admin.query(
+        `GRANT USAGE ON SCHEMA microjbase TO ${quoteIdent(NO_SELECT_ROLE)}`,
+      )
+    })
+    const probeUrl = new URL(adminDatabaseUrl as string)
+    probeUrl.username = NO_SELECT_ROLE
+    probeUrl.password = "noselect_password"
+    const probePool = createPool({
+      databaseUrl: probeUrl.toString(),
+      maxConnections: 2,
+    })
+    try {
+      const client = await probePool.connect()
+      try {
+        await expect(checkSchemaMigrationsReadAccess(client)).rejects.toThrow(
+          "missing required privilege SELECT on microjbase.schema_migrations",
+        )
+        await expect(
+          checkSchemaMigrationsReadAccess(client),
+        ).rejects.toMatchObject({
+          code: "DATABASE_UNAVAILABLE",
+          status: 503,
+        })
+      } finally {
+        client.release()
+      }
+    } finally {
+      await probePool.close()
+      await withAdminClient(async (admin) => {
+        await admin.query(
+          `REVOKE ALL ON SCHEMA microjbase FROM ${quoteIdent(NO_SELECT_ROLE)}`,
+        )
+        await admin.query(`DROP ROLE IF EXISTS ${quoteIdent(NO_SELECT_ROLE)}`)
+      })
+    }
   })
 })

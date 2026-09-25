@@ -16,6 +16,7 @@ import type { DataService } from "../data/index.js"
 import type { Pool } from "../database/index.js"
 
 import { type AdminDependencies, registerAdminRoutes } from "./admin-routes.js"
+import { registerAdminUi } from "./admin-ui.js"
 import { registerAuthRoutes } from "./auth-routes.js"
 import { registerDataRoutes } from "./data-routes.js"
 import { registerHealthRoute } from "./health.js"
@@ -50,15 +51,21 @@ export interface ServerDependencies {
 
 /**
  * True for request paths under /v1/auth/ or /v1/admin/ (and the bare
- * prefixes). Both trees require Cache-Control: no-store on every response,
- * including Fastify pre-route failures that never reach a handler.
+ * prefixes) and the management UI shell under /admin. All of them require
+ * Cache-Control: no-store on every response, including Fastify pre-route
+ * failures that never reach a handler. The
+ * query string is stripped first: request.url includes it, and an admin
+ * path with a query (?x=1) is still an admin-tree path.
  */
 function isNoStorePath(url: string): boolean {
+  const path = url.split("?")[0] ?? ""
   return (
-    url === "/v1/auth" ||
-    url.startsWith("/v1/auth/") ||
-    url === "/v1/admin" ||
-    url.startsWith("/v1/admin/")
+    path === "/v1/auth" ||
+    path.startsWith("/v1/auth/") ||
+    path === "/v1/admin" ||
+    path.startsWith("/v1/admin/") ||
+    path === "/admin" ||
+    path.startsWith("/admin/")
   )
 }
 
@@ -200,6 +207,9 @@ function registerRoutes(
         rateLimiter: adminRateLimiter,
       }),
     )
+    // The management UI shell ships with the same process and exists only
+    // alongside the admin lane it speaks to (D-012).
+    promises.push(registerAdminUi(app))
   }
 
   return Promise.all(promises).then(() => undefined)

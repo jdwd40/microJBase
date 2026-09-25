@@ -27,6 +27,7 @@ import {
   checkRuntimeRoleSafety,
   checkRuntimeTablePrivileges,
   checkSchemaAdminRoleSafety,
+  checkSchemaMigrationsReadAccess,
   checkSchemaOperationLogWriteAccess,
   checkExposureRegistryWriteAccess,
   checkTableOwnershipAndRls,
@@ -150,6 +151,7 @@ export async function start(): Promise<StartedServer> {
       await assertSchemaAdminRoleSafety(adminPool)
       await assertSchemaAdminHistoryWriteAccess(adminPool)
       await assertSchemaAdminExposureAccess(adminPool)
+      await assertSchemaAdminMigrationsReadAccess(adminPool)
       await assertSchemaAdminLaneDistinctness(pool, adminPool)
     }
 
@@ -362,6 +364,21 @@ async function assertSchemaAdminExposureAccess(pool: Pool): Promise<void> {
   const client = await pool.connect()
   try {
     await checkExposureRegistryWriteAccess(client)
+  } finally {
+    client.release()
+  }
+}
+
+// D-037.6: the snapshot reads migration history through the admin pool, so
+// the out-of-band SELECT ON microjbase.schema_migrations grant is probed
+// here like the other admin grants; without it the first history read
+// would surface later as a 500.
+async function assertSchemaAdminMigrationsReadAccess(
+  pool: Pool,
+): Promise<void> {
+  const client = await pool.connect()
+  try {
+    await checkSchemaMigrationsReadAccess(client)
   } finally {
     client.release()
   }

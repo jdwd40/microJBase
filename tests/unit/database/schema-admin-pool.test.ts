@@ -6,6 +6,7 @@ import {
   SCHEMA_ADMIN_MAX_CONNECTIONS,
   assertSchemaAdminSessionDistinct,
   checkSchemaAdminRoleSafety,
+  checkSchemaMigrationsReadAccess,
   checkSchemaOperationLogWriteAccess,
   createSchemaAdminPool,
 } from "../../../src/database/index.js"
@@ -213,6 +214,43 @@ describe("checkSchemaOperationLogWriteAccess", () => {
       checkSchemaOperationLogWriteAccess(privilegeClient(3)),
     ).rejects.toThrow(
       "missing required privilege USAGE on microjbase.schema_operations_id_seq",
+    )
+  })
+})
+
+describe("checkSchemaMigrationsReadAccess", () => {
+  function privilegeClient(has: boolean | null) {
+    // has === null simulates the privilege query returning no row.
+    return {
+      query: async () => ({
+        rows: has === null ? [] : [{ has }],
+        rowCount: has === null ? 0 : 1,
+      }),
+    } as never
+  }
+
+  it("resolves when SELECT on microjbase.schema_migrations is granted", async () => {
+    await expect(
+      checkSchemaMigrationsReadAccess(privilegeClient(true)),
+    ).resolves.toBeUndefined()
+  })
+
+  it("fails closed with a clear message when SELECT is missing", async () => {
+    await expect(
+      checkSchemaMigrationsReadAccess(privilegeClient(false)),
+    ).rejects.toThrow(
+      "missing required privilege SELECT on microjbase.schema_migrations",
+    )
+    await expect(
+      checkSchemaMigrationsReadAccess(privilegeClient(false)),
+    ).rejects.toMatchObject({ code: "DATABASE_UNAVAILABLE", status: 503 })
+  })
+
+  it("fails closed when the privilege query returns no row", async () => {
+    await expect(
+      checkSchemaMigrationsReadAccess(privilegeClient(null)),
+    ).rejects.toThrow(
+      "missing required privilege SELECT on microjbase.schema_migrations",
     )
   })
 })

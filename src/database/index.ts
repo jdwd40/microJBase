@@ -50,6 +50,7 @@ export {
 } from "./schema-catalogue.js"
 export {
   MIGRATION_HISTORY_SQL,
+  checkSchemaMigrationsReadAccess,
   classifySchemaObject,
   createSchemaSnapshot,
   createSchemaSnapshotReader,
