@@ -337,6 +337,14 @@ export async function importInitialExposure(
   return readExposureRegistryState(deps)
 }
 
+// Keys are NUL-joined because validated identifiers can otherwise collide
+// when concatenated — ("ab","c","d") and ("a","bc","d") both compile to
+// "abcd" (same class of collision deterministicObjectName guards against;
+// buildImportPayload's identifier patterns reject NUL).
+function exposedSetKey(entry: ImportPayloadEntry): string {
+  return `${entry.alias}\u0000${entry.schema}\u0000${entry.table}`
+}
+
 function exposedSetsEqual(
   exposed: readonly ExposureRegistryEntry[],
   payload: readonly ImportPayloadEntry[],
@@ -345,15 +353,13 @@ function exposedSetsEqual(
     return false
   }
   const keys = (entries: readonly ImportPayloadEntry[]): Set<string> =>
-    new Set(
-      entries.map((entry) => `${entry.alias}${entry.schema}${entry.table}`),
-    )
+    new Set(entries.map(exposedSetKey))
   const exposedKeys = keys(exposed)
   if (exposedKeys.size !== exposed.length) {
     return false
   }
   for (const entry of payload) {
-    if (!exposedKeys.has(`${entry.alias}${entry.schema}${entry.table}`)) {
+    if (!exposedKeys.has(exposedSetKey(entry))) {
       return false
     }
   }

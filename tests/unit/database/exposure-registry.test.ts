@@ -328,6 +328,36 @@ describe("importInitialExposure", () => {
     ).rejects.toThrow(/initialized concurrently with a different mapping set/)
   })
 
+  it("conflicts when the winner only differs by a key-splice collision (ab/c/d vs a/bc/d)", async () => {
+    const fake: FakeRegistry = {
+      initialized: false,
+      importedAt: null,
+      rows: [],
+      failNextImport: true,
+      winOnFailure: true,
+      winnerRows: [{ alias: "ab", schema: "c", table: "d" }],
+    }
+    const { query } = createFake(fake)
+    await expect(
+      importInitialExposure({ query }, [mapping("a", "bc", "d")]),
+    ).rejects.toThrow(/initialized concurrently with a different mapping set/)
+  })
+
+  it("conflicts when the winner only differs by a key-splice collision (todos/app/items vs todo/sapp/items)", async () => {
+    const fake: FakeRegistry = {
+      initialized: false,
+      importedAt: null,
+      rows: [],
+      failNextImport: true,
+      winOnFailure: true,
+      winnerRows: [{ alias: "todos", schema: "app", table: "items" }],
+    }
+    const { query } = createFake(fake)
+    await expect(
+      importInitialExposure({ query }, [mapping("todo", "sapp", "items")]),
+    ).rejects.toThrow(/initialized concurrently with a different mapping set/)
+  })
+
   it("conflicts when the winner's set only differs by an extra mapping", async () => {
     const fake: FakeRegistry = {
       initialized: false,
