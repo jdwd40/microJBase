@@ -42,6 +42,7 @@ const APPLIED_MIGRATIONS = [
   "0002_auth_tables.sql",
   "0003_auth_token_hash_unique.sql",
   "0004_todos_table.sql",
+  "0005_schema_operations.sql",
 ] as const
 
 async function withAdminClient<T>(fn: (client: pg.Client) => Promise<T>) {

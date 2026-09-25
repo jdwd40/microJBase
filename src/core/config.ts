@@ -21,6 +21,8 @@ export type LogLevel = (typeof VALID_LOG_LEVELS)[number]
 export interface AppConfig {
   databaseUrl: string
   migrationDatabaseUrl: string | null
+  schemaDatabaseUrl: string | null
+  adminTokenSha256: string | null
   host: string
   port: number
   logLevel: LogLevel
@@ -53,6 +55,12 @@ export function parseConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     env,
     "MIGRATION_DATABASE_URL",
   )
+  const schemaDatabaseUrl = optionalNonEmptyString(env, "SCHEMA_DATABASE_URL")
+  const adminTokenSha256 = parseAdminTokenDigest(
+    optionalNonEmptyString(env, "MICROJBASE_ADMIN_TOKEN_SHA256"),
+  )
+  assertSchemaAdminConfigPairing(schemaDatabaseUrl, adminTokenSha256)
+  assertSchemaAdminUrlDistinct(databaseUrl, schemaDatabaseUrl)
   const host = env.HOST ?? DEFAULTS.host
   const port = parsePort(env.PORT)
   const logLevel = parseLogLevel(env.LOG_LEVEL)
@@ -72,6 +80,8 @@ export function parseConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     databaseUrl,
     migrationDatabaseUrl,
+    schemaDatabaseUrl,
+    adminTokenSha256,
     host,
     port,
     logLevel,
@@ -108,6 +118,64 @@ function optionalNonEmptyString(
     return null
   }
   return raw
+}
+
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/
+
+// The configured operator-token digest is a SHA-256 hex rendering. Rejecting
+// malformed digests at startup catches operator paste errors before the
+// admin module is silently half-configured.
+function parseAdminTokenDigest(raw: string | null): string | null {
+  if (raw === null) {
+    return null
+  }
+  const normalized = raw.trim().toLowerCase()
+  if (!SHA256_HEX_PATTERN.test(normalized)) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "MICROJBASE_ADMIN_TOKEN_SHA256 must be a 64-character lowercase SHA-256 hex digest",
+      400,
+      { variable: "MICROJBASE_ADMIN_TOKEN_SHA256" },
+    )
+  }
+  return normalized
+}
+
+// The schema-admin module is opt-in and disabled by default: both the
+// schema-admin connection URL and the operator-token digest must be
+// configured together, or the module is inert. Exactly one of the two is an
+// operator mistake and must fail startup (D-012).
+function assertSchemaAdminConfigPairing(
+  schemaDatabaseUrl: string | null,
+  adminTokenSha256: string | null,
+): void {
+  if ((schemaDatabaseUrl === null) !== (adminTokenSha256 === null)) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "SCHEMA_DATABASE_URL and MICROJBASE_ADMIN_TOKEN_SHA256 must be configured together",
+      400,
+      {
+        variables: ["SCHEMA_DATABASE_URL", "MICROJBASE_ADMIN_TOKEN_SHA256"],
+      },
+    )
+  }
+}
+
+// The schema-admin lane must never share the runtime data connection surface
+// (D-011). It may share a role with the migration lane, but never with the
+// restricted runtime lane.
+function assertSchemaAdminUrlDistinct(
+  databaseUrl: string,
+  schemaDatabaseUrl: string | null,
+): void {
+  if (schemaDatabaseUrl !== null && schemaDatabaseUrl === databaseUrl) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "SCHEMA_DATABASE_URL must not equal DATABASE_URL (the runtime data role)",
+      400,
+      { variable: "SCHEMA_DATABASE_URL" },
+    )
+  }
 }
 
 function parsePort(raw: string | undefined): number {
@@ -370,5 +438,12 @@ export function safeConfigForLogging(
     migrationDatabaseUrl: config.migrationDatabaseUrl
       ? redactUrlPassword(config.migrationDatabaseUrl)
       : null,
+    schemaDatabaseUrl: config.schemaDatabaseUrl
+      ? redactUrlPassword(config.schemaDatabaseUrl)
+      : null,
+    // The operator-token digest is never logged, even though the operator
+    // supplied it: config logs routinely ship to aggregators, and the digest
+    // is the only stored secret-equivalent of the admin lane.
+    adminTokenSha256: config.adminTokenSha256 ? "***" : null,
   }
 }

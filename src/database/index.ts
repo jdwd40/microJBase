@@ -62,6 +62,42 @@ export {
   type SchemaSnapshotInput,
 } from "./schema-snapshot.js"
 export {
+  SCHEMA_ADMIN_MAX_CONNECTIONS,
+  checkSchemaAdminRoleSafety,
+  createSchemaAdminPool,
+  type SchemaAdminPoolConfig,
+  type SchemaAdminRoleSafety,
+} from "./schema-admin-pool.js"
+export {
+  computeActorFingerprint,
+  computeOperationChecksum,
+  createSchemaOperationLog,
+  type BeginOperationInput,
+  type ListOperationsInput,
+  type SchemaOperationBeginOutcome,
+  type SchemaOperationLog,
+  type SchemaOperationLogDependencies,
+  type SchemaOperationRecord,
+  type SchemaOperationStatus,
+} from "./schema-operation-log.js"
+export {
+  MIGRATION_LOCK_KEY_FOR_DISTINCTION,
+  SCHEMA_DDL_LOCK_KEY,
+  compileCreateTable,
+  createSchemaDdlExecutor,
+  describePlan,
+  translateDdlError,
+  type CreateTableSpec,
+  type DdlColumnDefault,
+  type DdlColumnSpec,
+  type DdlColumnType,
+  type DdlPlan,
+  type ExecuteOptions,
+  type ExecuteOutcome,
+  type SchemaDdlExecutor,
+  type SchemaDdlExecutorDependencies,
+} from "./schema-ddl.js"
+export {
   type ColumnMetadata,
   type VerifiedTableMetadata,
 } from "./table-types.js"

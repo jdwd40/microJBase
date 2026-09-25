@@ -324,3 +324,110 @@ describe("safeConfigForLogging", () => {
     )
   })
 })
+
+describe("parseConfig schema-admin lane (V02-04)", () => {
+  it("leaves the admin lane inert with neither setting", () => {
+    const config = parseConfig({
+      DATABASE_URL: "postgres://runtime:secret@127.0.0.1:5432/db",
+    })
+    expect(config.schemaDatabaseUrl).toBeNull()
+    expect(config.adminTokenSha256).toBeNull()
+  })
+
+  it("parses both admin settings together", () => {
+    const config = parseConfig({
+      DATABASE_URL: "postgres://runtime:secret@127.0.0.1:5432/db",
+      SCHEMA_DATABASE_URL: "postgres://schema:secret@127.0.0.1:5432/db",
+      MICROJBASE_ADMIN_TOKEN_SHA256:
+        "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+    })
+    expect(config.schemaDatabaseUrl).toBe(
+      "postgres://schema:secret@127.0.0.1:5432/db",
+    )
+    expect(config.adminTokenSha256).toBe(
+      "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+    )
+  })
+
+  it("fails startup when only SCHEMA_DATABASE_URL is set", () => {
+    expect(() =>
+      parseConfig({
+        DATABASE_URL: "postgres://runtime:secret@127.0.0.1:5432/db",
+        SCHEMA_DATABASE_URL: "postgres://schema:secret@127.0.0.1:5432/db",
+      }),
+    ).toThrow(
+      "SCHEMA_DATABASE_URL and MICROJBASE_ADMIN_TOKEN_SHA256 must be configured together",
+    )
+  })
+
+  it("fails startup when only MICROJBASE_ADMIN_TOKEN_SHA256 is set", () => {
+    expect(() =>
+      parseConfig({
+        DATABASE_URL: "postgres://runtime:secret@127.0.0.1:5432/db",
+        MICROJBASE_ADMIN_TOKEN_SHA256:
+          "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+      }),
+    ).toThrow(
+      "SCHEMA_DATABASE_URL and MICROJBASE_ADMIN_TOKEN_SHA256 must be configured together",
+    )
+  })
+
+  it("rejects malformed token digests", () => {
+    expect(() =>
+      parseConfig({
+        DATABASE_URL: "postgres://runtime:secret@127.0.0.1:5432/db",
+        SCHEMA_DATABASE_URL: "postgres://schema:secret@127.0.0.1:5432/db",
+        MICROJBASE_ADMIN_TOKEN_SHA256: "not-a-digest",
+      }),
+    ).toThrow("MICROJBASE_ADMIN_TOKEN_SHA256 must be a 64-character")
+  })
+
+  it("normalizes uppercase hex digests", () => {
+    const config = parseConfig({
+      DATABASE_URL: "postgres://runtime:secret@127.0.0.1:5432/db",
+      SCHEMA_DATABASE_URL: "postgres://schema:secret@127.0.0.1:5432/db",
+      MICROJBASE_ADMIN_TOKEN_SHA256:
+        "AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899",
+    })
+    expect(config.adminTokenSha256).toBe(
+      "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+    )
+  })
+
+  it("rejects SCHEMA_DATABASE_URL equal to DATABASE_URL", () => {
+    expect(() =>
+      parseConfig({
+        DATABASE_URL: "postgres://runtime:secret@127.0.0.1:5432/db",
+        SCHEMA_DATABASE_URL: "postgres://runtime:secret@127.0.0.1:5432/db",
+        MICROJBASE_ADMIN_TOKEN_SHA256:
+          "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+      }),
+    ).toThrow("SCHEMA_DATABASE_URL must not equal DATABASE_URL")
+  })
+
+  it("allows SCHEMA_DATABASE_URL equal to MIGRATION_DATABASE_URL", () => {
+    const config = parseConfig({
+      DATABASE_URL: "postgres://runtime:secret@127.0.0.1:5432/db",
+      MIGRATION_DATABASE_URL: "postgres://admin:secret@127.0.0.1:5432/db",
+      SCHEMA_DATABASE_URL: "postgres://admin:secret@127.0.0.1:5432/db",
+      MICROJBASE_ADMIN_TOKEN_SHA256:
+        "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+    })
+    expect(config.schemaDatabaseUrl).toBe(config.migrationDatabaseUrl)
+  })
+
+  it("safeConfigForLogging redacts the schema URL and never logs the digest", () => {
+    const config = parseConfig({
+      DATABASE_URL: "postgres://runtime:secret@127.0.0.1:5432/db",
+      SCHEMA_DATABASE_URL: "postgres://schema:secret@127.0.0.1:5432/db",
+      MICROJBASE_ADMIN_TOKEN_SHA256:
+        "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+    })
+    const safe = safeConfigForLogging(config)
+    expect(safe.schemaDatabaseUrl).toBe(
+      "postgres://schema:***@127.0.0.1:5432/db",
+    )
+    expect(safe.adminTokenSha256).toBe("***")
+    expect(JSON.stringify(safe)).not.toContain("aabbccdd")
+  })
+})

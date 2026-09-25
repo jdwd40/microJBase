@@ -73,7 +73,7 @@
         <h2>Current work</h2>
         <p class="muted">
           Last updated:
-          <time datetime="2026-09-24T22:30:00Z">2026-09-24 22:30 UTC</time>.
+          <time datetime="2026-09-25T09:20:00Z">2026-09-25 09:20 UTC</time>.
         </p>
         <p>
           <span class="badge done">completed</span>
@@ -96,10 +96,34 @@
             state</strong
           >
           are implemented on <code>master</code> at
-          <time datetime="2026-09-24T22:30:00Z">2026-09-24 22:30 UTC</time> with
+          <time datetime="2026-09-25T09:20:00Z">2026-09-25 09:20 UTC</time> with
           the full suite green at 39 files / 420 tests. They preserve the
           single-query catalogue read and add no HTTP routes, no DDL, and no
           database mutation. Independent review is the next gate.
+        </p>
+        <p>
+          <span class="badge progress">implemented</span>
+          <strong
+            >V02-04 — Schema-admin connection and capability boundary</strong
+          >,
+          <strong
+            >V02-05 — Durable schema-operation history and idempotency</strong
+          >, and
+          <strong>V02-06 — Typed DDL planner/compiler and executor</strong> are
+          implemented on <code>master</code> at
+          <time datetime="2026-09-25T09:20:00Z">2026-09-25 09:20 UTC</time>. The
+          admin lane is disabled by default: startup fails on partial admin
+          config, on a schema URL equal to the runtime URL, and on superuser,
+          <code>BYPASSRLS</code>, or <code>CREATEROLE</code>
+          schema-admin roles. Operation records persist with checksums,
+          idempotency keys, and salted actor fingerprints; the single DDL
+          compiler enforces the frozen type/default allowlists, runs dry-run
+          under a mandatory rollback, serializes on the reserved advisory key
+          <code>7921890504698152930</code>, and maps PostgreSQL errors to safe
+          envelopes. Unit and integration suites are green at 37 files / 465
+          tests against real PostgreSQL, including replay, conflict,
+          concurrency, rollback, lane-isolation, and log-redaction coverage.
+          Independent review is the next gate.
         </p>
         <p>
           The v0.2 queue and wave structure are on the
@@ -143,7 +167,10 @@
             </tr>
             <tr>
               <td>Typed DDL layer and operation history</td>
-              <td><span class="badge queued">queued</span> V02-04..V02-06</td>
+              <td>
+                <span class="badge done">implemented</span> V02-04..V02-06;
+                await independent review
+              </td>
             </tr>
             <tr>
               <td>Table/column lifecycle commands</td>
@@ -197,7 +224,7 @@
       <div class="wrap">
         Static wiki: relative links only, no external assets, no JavaScript.
         Last updated
-        <time datetime="2026-09-24T22:30:00Z">2026-09-24 22:30 UTC</time>.
+        <time datetime="2026-09-25T09:20:00Z">2026-09-25 09:20 UTC</time>.
       </div>
     </footer>
   </body>

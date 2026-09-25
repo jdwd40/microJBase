@@ -90,7 +90,7 @@
           </li>
           <li>
             <strong>
-              <time datetime="2026-09-24T22:30:00Z">2026-09-24 22:30 UTC</time>
+              <time datetime="2026-09-25T09:20:00Z">2026-09-25 09:20 UTC</time>
               — V02-02 and V02-03 implemented.</strong
             >
             Kimi implemented constraint and index introspection (V02-02) and the
@@ -102,6 +102,25 @@
             full suite is green at 39 files / 420 tests. Independent review is
             the next gate before merge.
           </li>
+          <li>
+            <strong>
+              <time datetime="2026-09-25T09:20:00Z">2026-09-25 09:20 UTC</time>
+              — V02-04, V02-05, and V02-06 implemented.</strong
+            >
+            Kimi implemented the disabled-by-default schema-admin connection and
+            capability boundary (startup fails on partial admin config,
+            runtime-lane URL sharing, and superuser/<code>BYPASSRLS</code>/<code
+              >CREATEROLE</code
+            >
+            roles), the durable checksummed operation history with idempotency
+            replay/conflict/retry semantics and salted actor fingerprints, and
+            the single typed DDL compiler/executor with dry-run rollback,
+            reserved advisory key <code>7921890504698152930</code>, frozen
+            type/default allowlists, and safe redacted error mapping. Migration
+            <code>0005_schema_operations.sql</code> is forward-only. Unit and
+            integration suites are green at 37 files / 465 tests against real
+            PostgreSQL 18. Independent review is the next gate before merge.
+          </li>
         </ol>
       </div>
     </main>
@@ -109,7 +128,7 @@
       <div class="wrap">
         Static wiki: relative links only, no external assets, no JavaScript.
         Last updated
-        <time datetime="2026-09-24T22:30:00Z">2026-09-24 22:30 UTC</time>.
+        <time datetime="2026-09-25T09:20:00Z">2026-09-25 09:20 UTC</time>.
       </div>
     </footer>
   </body>

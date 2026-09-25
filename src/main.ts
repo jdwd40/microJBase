@@ -24,10 +24,12 @@ import {
   checkApplicablePolicies,
   checkRuntimeRoleSafety,
   checkRuntimeTablePrivileges,
+  checkSchemaAdminRoleSafety,
   checkTableOwnershipAndRls,
   createAuthRepository,
   createPool,
   createPostgresDataRepository,
+  createSchemaAdminPool,
   createTransactionRunner,
   buildTableRegistry,
   type Pool,
@@ -40,6 +42,7 @@ import {
 interface StartedServer {
   app: FastifyInstance
   pool: Pool
+  adminPool: Pool | null
 }
 
 export function buildServer(
@@ -56,10 +59,21 @@ export async function start(): Promise<StartedServer> {
     maxConnections: 10,
   })
 
+  // The schema-admin lane is opt-in (D-012): with neither admin setting
+  // configured it never exists, with exactly one parseConfig already failed,
+  // and with both configured the pool is created and its role capability
+  // checked before the server accepts traffic.
+  const adminPool = config.schemaDatabaseUrl
+    ? createSchemaAdminPool({ databaseUrl: config.schemaDatabaseUrl })
+    : null
+
   let started: StartedServer | undefined
   try {
     await assertRuntimeRoleSafety(pool)
     await assertExposedTableSafety(pool, config.tables)
+    if (adminPool) {
+      await assertSchemaAdminRoleSafety(adminPool)
+    }
 
     const registry = await buildTableRegistry(
       { mappings: config.tables },
@@ -93,6 +107,7 @@ export async function start(): Promise<StartedServer> {
         config: safeConfigForLogging(config),
         host: config.host,
         port: config.port,
+        schemaAdminEnabled: adminPool !== null,
       },
       "Server listening",
     )
@@ -102,19 +117,29 @@ export async function start(): Promise<StartedServer> {
         close: async () => {
           await app.close()
           await pool.close()
+          if (adminPool) {
+            await adminPool.close()
+          }
         },
       },
     ])
 
-    started = { app, pool }
+    started = { app, pool, adminPool }
     return started
   } catch (error: unknown) {
-    // If startup fails after creating the pool, close it before propagating
-    // so we do not leak connections.
+    // If startup fails after creating the pools, close them before
+    // propagating so we do not leak connections.
     try {
       await pool.close()
     } catch {
       // Ignore secondary close errors; original error is what matters.
+    }
+    if (adminPool) {
+      try {
+        await adminPool.close()
+      } catch {
+        // Ignore secondary close errors; original error is what matters.
+      }
     }
     throw error
   }
@@ -124,6 +149,15 @@ async function assertRuntimeRoleSafety(pool: Pool): Promise<void> {
   const client = await pool.connect()
   try {
     await checkRuntimeRoleSafety(client)
+  } finally {
+    client.release()
+  }
+}
+
+async function assertSchemaAdminRoleSafety(pool: Pool): Promise<void> {
+  const client = await pool.connect()
+  try {
+    await checkSchemaAdminRoleSafety(client)
   } finally {
     client.release()
   }
