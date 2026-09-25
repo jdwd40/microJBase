@@ -37,6 +37,8 @@ import {
   createSchemaDdlExecutor,
   createSchemaExposureService,
   createSchemaOperationLog,
+  createSchemaPolicyService,
+  createSchemaRlsService,
   createTransactionRunner,
   createSwappableTableRegistry,
   buildTableRegistry,
@@ -44,6 +46,8 @@ import {
   readExposureRegistryState,
   type Pool,
   type SchemaExposureService,
+  type SchemaPolicyService,
+  type SchemaRlsService,
 } from "./database/index.js"
 import {
   buildServer as buildHttpServer,
@@ -55,7 +59,11 @@ interface StartedServer {
   pool: Pool
   adminPool: Pool | null
   /** Composed admin-lane services; null when the admin lane is disabled. */
-  admin: { exposure: SchemaExposureService } | null
+  admin: {
+    exposure: SchemaExposureService
+    rls: SchemaRlsService
+    policies: SchemaPolicyService
+  } | null
 }
 
 export function buildServer(
@@ -133,19 +141,37 @@ export async function start(): Promise<StartedServer> {
 
     let admin: StartedServer["admin"] = null
     if (adminPool) {
+      const adminCatalogue = createSchemaCatalogueReader({
+        query: (text, values) => adminPool.query(text, values),
+      })
+      const adminExecutor = createSchemaDdlExecutor({
+        pool: adminPool,
+        createOperationLog: (query) => createSchemaOperationLog({ query }),
+      })
+      const adminRole = await readSessionRole(adminPool)
+      const runtimeRole = await readSessionRole(pool)
       admin = {
         exposure: createSchemaExposureService({
           pool: adminPool,
-          catalogue: createSchemaCatalogueReader({
-            query: (text, values) => adminPool.query(text, values),
-          }),
-          executor: createSchemaDdlExecutor({
-            pool: adminPool,
-            createOperationLog: (query) => createSchemaOperationLog({ query }),
-          }),
-          adminRole: await readSessionRole(adminPool),
-          runtimeRole: await readSessionRole(pool),
+          catalogue: adminCatalogue,
+          executor: adminExecutor,
+          adminRole,
+          runtimeRole,
           refreshRuntimeRegistry,
+        }),
+        rls: createSchemaRlsService({
+          pool: adminPool,
+          catalogue: adminCatalogue,
+          registry,
+          adminRole,
+          executor: adminExecutor,
+        }),
+        policies: createSchemaPolicyService({
+          pool: adminPool,
+          catalogue: adminCatalogue,
+          adminRole,
+          runtimeRole,
+          executor: adminExecutor,
         }),
       }
     }

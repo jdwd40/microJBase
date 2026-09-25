@@ -756,7 +756,7 @@ function assertDdlName(name: string, context: string): void {
 const MAX_KEY_COLUMNS = 16
 
 export function deterministicObjectName(
-  kind: "idx" | "uniq" | "fkey",
+  kind: "idx" | "uniq" | "fkey" | OwnershipPolicyTemplate,
   table: string,
   columns: readonly string[],
 ): string {
@@ -1172,6 +1172,175 @@ export function compileMarkUnexposed(spec: MarkUnexposedSpec): DdlPlan {
   return sealPlan({
     statements: [statement],
     description: "mark a table unexposed in the durable exposure registry",
+  })
+}
+
+// ---------------------------------------------------------------------------
+// V02-14..V02-15 typed builders: row-security state management and the
+// predefined user_id ownership policy templates (D-019). The same invariants
+// apply: identifiers pass conservative validation and one quoting helper,
+// internal schemas are refused before SQL exists, and every statement carries
+// exactly one command. Policy expressions have no caller-supplied fragment:
+// every template renders one fixed ownership comparison against the
+// transaction-local microjbase.user_id setting.
+// ---------------------------------------------------------------------------
+
+export interface RowSecurityTargetSpec {
+  readonly schema: string
+  readonly table: string
+}
+
+// Enablement always forces RLS as well: an exposed table must never sit with
+// row security enabled but unforced, because the table owner (and any other
+// non-policy-checked path) would silently bypass the policies the runtime
+// lane is subject to.
+export function compileEnableRowSecurity(spec: RowSecurityTargetSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  assertDdlIdentifier(spec.table)
+  const target = `${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)}`
+  return sealPlan({
+    statements: [
+      `ALTER TABLE ${target} ENABLE ROW LEVEL SECURITY`,
+      `ALTER TABLE ${target} FORCE ROW LEVEL SECURITY`,
+    ],
+    description: `enable and force row-level security on ${spec.schema}.${spec.table}`,
+  })
+}
+
+// Disablement drops the FORCE flag before disabling RLS so the relforcerow
+// security bit never outlives the row-security bit inside the same
+// transaction. Whether the command may run at all is a service-level guard:
+// the compiler only renders the statements.
+export function compileDisableRowSecurity(
+  spec: RowSecurityTargetSpec,
+): DdlPlan {
+  assertManageableSchema(spec.schema)
+  assertDdlIdentifier(spec.table)
+  const target = `${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)}`
+  return sealPlan({
+    statements: [
+      `ALTER TABLE ${target} NO FORCE ROW LEVEL SECURITY`,
+      `ALTER TABLE ${target} DISABLE ROW LEVEL SECURITY`,
+    ],
+    description: `disable row-level security on ${spec.schema}.${spec.table}`,
+  })
+}
+
+/**
+ * The four predefined ownership templates (D-019). Each binds one command to
+ * the fixed `microjbase.user_id` ownership comparison; there is deliberately
+ * no arbitrary policy-expression path.
+ */
+export type OwnershipPolicyTemplate = "read" | "insert" | "update" | "delete"
+
+interface OwnershipPolicyTemplateShape {
+  /** The PostgreSQL FOR command the template compiles to. */
+  readonly command: "SELECT" | "INSERT" | "UPDATE" | "DELETE"
+  /** Whether the template renders a USING clause. */
+  readonly using: boolean
+  /** Whether the template renders a WITH CHECK clause. */
+  readonly withCheck: boolean
+}
+
+const OWNERSHIP_POLICY_TEMPLATES: Readonly<
+  Record<OwnershipPolicyTemplate, OwnershipPolicyTemplateShape>
+> = Object.freeze({
+  read: { command: "SELECT", using: true, withCheck: false },
+  insert: { command: "INSERT", using: false, withCheck: true },
+  update: { command: "UPDATE", using: true, withCheck: true },
+  delete: { command: "DELETE", using: true, withCheck: false },
+})
+
+// The frozen ownership comparison every template applies to the validated
+// UUID ownership column. The transaction-local GUC carries the request
+// identity set by the runtime lane; an empty or missing setting never
+// matches a row, so an unset identity fails closed instead of seeing all.
+const OWNERSHIP_EXPRESSION =
+  "nullif(current_setting('microjbase.user_id', true), '')::uuid"
+
+export interface OwnershipPolicySpec {
+  readonly schema: string
+  readonly table: string
+  /** The validated UUID ownership column the template binds to. */
+  readonly column: string
+  readonly template: OwnershipPolicyTemplate
+  /** The restricted runtime role the policy applies TO. */
+  readonly role: string
+}
+
+export interface DropOwnershipPolicySpec {
+  readonly schema: string
+  readonly table: string
+  readonly column: string
+  readonly template: OwnershipPolicyTemplate
+}
+
+/**
+ * Deterministic module-owned policy name. Removal addresses policies only by
+ * this name, so a removal command can never target an operator-authored
+ * policy; and the mjb_ prefix keeps module-created objects distinguishable
+ * in the catalogue (D-029 naming scheme extended to policies).
+ */
+export function ownershipPolicyName(
+  table: string,
+  column: string,
+  template: OwnershipPolicyTemplate,
+): string {
+  return deterministicObjectName(template, table, [column])
+}
+
+function compileOwnershipComparison(column: string): string {
+  return `${quoteIdentifier(column)} = ${OWNERSHIP_EXPRESSION}`
+}
+
+function assertOwnershipPolicySpec(
+  spec: OwnershipPolicySpec | DropOwnershipPolicySpec,
+): OwnershipPolicyTemplateShape {
+  assertManageableSchema(spec.schema)
+  assertDdlIdentifier(spec.table)
+  assertDdlIdentifier(spec.column)
+  const template = OWNERSHIP_POLICY_TEMPLATES[spec.template]
+  if (template === undefined) {
+    throw invalidInput(`policy template "${spec.template}" is not allowlisted`)
+  }
+  return template
+}
+
+export function compileCreateOwnershipPolicy(
+  spec: OwnershipPolicySpec,
+): DdlPlan {
+  const template = assertOwnershipPolicySpec(spec)
+  assertDdlIdentifier(spec.role)
+  const name = ownershipPolicyName(spec.table, spec.column, spec.template)
+  assertDdlName(name, "policy name")
+  const target = `${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)}`
+  const comparison = compileOwnershipComparison(spec.column)
+  let statement =
+    `CREATE POLICY ${quoteIdentifier(name)} ON ${target} ` +
+    `FOR ${template.command} TO ${quoteIdentifier(spec.role)}`
+  if (template.using) {
+    statement += ` USING (${comparison})`
+  }
+  if (template.withCheck) {
+    statement += ` WITH CHECK (${comparison})`
+  }
+  return sealPlan({
+    statements: [statement],
+    description: `create ${spec.template} ownership policy on ${spec.schema}.${spec.table}`,
+  })
+}
+
+export function compileDropOwnershipPolicy(
+  spec: DropOwnershipPolicySpec,
+): DdlPlan {
+  assertOwnershipPolicySpec(spec)
+  const name = ownershipPolicyName(spec.table, spec.column, spec.template)
+  assertDdlName(name, "policy name")
+  const target = `${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)}`
+  const statement = `DROP POLICY ${quoteIdentifier(name)} ON ${target}`
+  return sealPlan({
+    statements: [statement],
+    description: `drop ${spec.template} ownership policy on ${spec.schema}.${spec.table}`,
   })
 }
 
