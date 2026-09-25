@@ -58,6 +58,9 @@ jobs:
             GRANT SELECT ON microjbase.schema_migrations TO microjbase_runtime;
             GRANT SELECT, INSERT ON microjbase.users TO microjbase_runtime;
             GRANT SELECT, INSERT, UPDATE ON microjbase.sessions TO microjbase_runtime;
+            GRANT SELECT ON microjbase.exposure_registry TO microjbase_runtime;
+            GRANT SELECT ON microjbase.exposure_registry_state TO microjbase_runtime;
+            GRANT EXECUTE ON FUNCTION microjbase.import_exposure_registry(JSONB) TO microjbase_runtime;
           "
 
       - name: Format check

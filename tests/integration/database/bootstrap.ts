@@ -34,6 +34,9 @@ export async function applyMigrationsAndGrants(
       GRANT SELECT ON microjbase.schema_migrations TO ${role};
       GRANT SELECT, INSERT ON microjbase.users TO ${role};
       GRANT SELECT, INSERT, UPDATE ON microjbase.sessions TO ${role};
+      GRANT SELECT ON microjbase.exposure_registry TO ${role};
+      GRANT SELECT ON microjbase.exposure_registry_state TO ${role};
+      GRANT EXECUTE ON FUNCTION microjbase.import_exposure_registry(JSONB) TO ${role};
     `)
   })
 }

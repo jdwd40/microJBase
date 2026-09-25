@@ -547,6 +547,32 @@ async function verifyTable(
   }
 }
 
+/**
+ * A TableRegistry whose delegate can be atomically replaced (V02-13).
+ * get/list delegate to the current immutable registry; replace() swaps the
+ * reference in one assignment, so concurrent CRUD requests observe either
+ * the complete old snapshot or the complete new snapshot, never a torn
+ * registry. The data service and exposure guards share one holder, which is
+ * what makes an expose/unexpose take effect atomically for new requests
+ * while in-flight requests keep the snapshot they started with.
+ */
+export interface SwappableTableRegistry extends TableRegistry {
+  replace(next: TableRegistry): void
+}
+
+export function createSwappableTableRegistry(
+  initial: TableRegistry,
+): SwappableTableRegistry {
+  let current = initial
+  return {
+    get: (alias) => current.get(alias),
+    list: () => current.list(),
+    replace: (next) => {
+      current = next
+    },
+  }
+}
+
 export function quoteTableIdentifier(schema: string, table: string): string {
   return quoteQualifiedName(schema, table)
 }

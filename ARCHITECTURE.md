@@ -143,7 +143,7 @@ HOST                         default 127.0.0.1
 PORT                         default 3000
 LOG_LEVEL                    default info
 SESSION_TTL_SECONDS          default 604800 (7 days)
-MICROJBASE_TABLES            required for data API; alias mappings
+MICROJBASE_TABLES            seeds the durable exposure registry once (v0.2); alias mappings
 TRUST_PROXY                   default false
 MAX_BODY_BYTES               default 1048576 (1 MiB)
 ```
@@ -165,8 +165,10 @@ Every exposed application table must:
 - have a single UUID primary key named `id`;
 - have RLS enabled and forced;
 - include policies for the runtime role;
-- be explicitly mapped in `MICROJBASE_TABLES`;
+- be recorded as `exposed` in the durable exposure registry (`microjbase.exposure_registry`, D-018), which the runtime reads as its sole exposure source;
 - not be in the `microjbase`, `pg_catalog`, or `information_schema` schemas.
+
+`MICROJBASE_TABLES` feeds the one-time import into that registry on the first startup after migration 0006 (validated before it commits); afterwards the environment variable can neither add tables nor re-expose an unexposed table.
 
 The exact SQL requirements are in [docs/database-spec.md](docs/database-spec.md).
 

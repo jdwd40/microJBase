@@ -48,6 +48,8 @@
 import type { JsonValue, JsonPrimitive } from "../contracts/index.js"
 import { AppError, type ErrorCode } from "../core/index.js"
 
+import { createHash } from "node:crypto"
+
 import type pg from "pg"
 
 import type { Pool } from "./pool.js"
@@ -719,6 +721,368 @@ $microjbase$`
 }
 
 // ---------------------------------------------------------------------------
+// V02-11..V02-13 typed builders: indexes, unique constraints, foreign keys,
+// and the runtime privilege/registry statements the exposure service
+// compiles. The same invariants apply: identifiers pass conservative
+// validation and one quoting helper, values are parameterised where
+// PostgreSQL permits and otherwise come from strictly validated literals,
+// internal schemas are refused before SQL exists, and every statement
+// carries exactly one command.
+// ---------------------------------------------------------------------------
+
+// PostgreSQL folds or truncates identifiers beyond 63 bytes; names that
+// long are refused rather than silently renamed. All accepted names are
+// ASCII (the identifier pattern), so character length equals byte length.
+const MAX_IDENTIFIER_LENGTH = 63
+
+function assertDdlName(name: string, context: string): void {
+  assertDdlIdentifier(name)
+  if (name.length > MAX_IDENTIFIER_LENGTH) {
+    throw invalidInput(`${context} must be at most 63 characters`)
+  }
+}
+
+// Module-created objects carry an mjb_ prefix so operators can tell managed
+// objects from pre-existing ones in the catalogue, and so later removal
+// commands can refuse to touch objects they did not create. Deterministic
+// names derive only from the validated table and column identifiers, so the
+// same command always compiles the same name; overlong bases are truncated
+// with a stable hash suffix instead of PostgreSQL's silent truncation. The
+// preflight guards reuse this helper so the existence probe and the
+// compiled statement can never drift apart.
+const MAX_KEY_COLUMNS = 16
+
+export function deterministicObjectName(
+  kind: "idx" | "uniq" | "fkey",
+  table: string,
+  columns: readonly string[],
+): string {
+  const base = `mjb_${table}_${columns.join("_")}_${kind}`
+  if (base.length <= MAX_IDENTIFIER_LENGTH) {
+    return base
+  }
+  const hash = createHash("sha256").update(base, "utf8").digest("hex")
+  const headLength = MAX_IDENTIFIER_LENGTH - hashPrefixLength - 1
+  return `${base.slice(0, headLength)}_${hash.slice(0, hashPrefixLength)}`
+}
+
+const hashPrefixLength = 8
+
+function assertKeyColumns(columns: readonly string[], context: string): void {
+  if (columns.length === 0) {
+    throw invalidInput(`${context} needs at least one column`)
+  }
+  if (columns.length > MAX_KEY_COLUMNS) {
+    throw invalidInput(
+      `${context} must have at most ${String(MAX_KEY_COLUMNS)} columns`,
+    )
+  }
+  const seen = new Set<string>()
+  for (const column of columns) {
+    assertDdlIdentifier(column)
+    if (seen.has(column)) {
+      throw invalidInput(`${context} lists column "${column}" more than once`)
+    }
+    seen.add(column)
+  }
+}
+
+function quoteColumnList(columns: readonly string[]): string {
+  return `(${columns.map((column) => quoteIdentifier(column)).join(", ")})`
+}
+
+export interface CreateIndexSpec {
+  readonly schema: string
+  readonly table: string
+  readonly columns: readonly string[]
+  /** Explicit name; validated, otherwise a deterministic name is derived. */
+  readonly name?: string
+}
+
+export function compileCreateIndex(spec: CreateIndexSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  assertDdlIdentifier(spec.table)
+  assertKeyColumns(spec.columns, "an index")
+  const name =
+    spec.name ?? deterministicObjectName("idx", spec.table, spec.columns)
+  assertDdlName(name, "index name")
+  const statement =
+    `CREATE INDEX ${quoteIdentifier(name)} ` +
+    `ON ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ${quoteColumnList(spec.columns)}`
+  return sealPlan({
+    statements: [statement],
+    description: `create index ${name} on ${spec.schema}.${spec.table}`,
+  })
+}
+
+export interface DropIndexSpec {
+  readonly schema: string
+  /** Index name; indexes are schema children, not table children. */
+  readonly name: string
+}
+
+export function compileDropIndex(spec: DropIndexSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  assertDdlName(spec.name, "index name")
+  const statement = `DROP INDEX ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.name)}`
+  return sealPlan({
+    statements: [statement],
+    description: `drop index ${spec.schema}.${spec.name}`,
+  })
+}
+
+export interface AddUniqueConstraintSpec {
+  readonly schema: string
+  readonly table: string
+  readonly columns: readonly string[]
+  /** Explicit name; validated, otherwise a deterministic name is derived. */
+  readonly name?: string
+}
+
+export function compileAddUniqueConstraint(
+  spec: AddUniqueConstraintSpec,
+): DdlPlan {
+  assertManageableSchema(spec.schema)
+  assertDdlIdentifier(spec.table)
+  assertKeyColumns(spec.columns, "a unique constraint")
+  const name =
+    spec.name ?? deterministicObjectName("uniq", spec.table, spec.columns)
+  assertDdlName(name, "constraint name")
+  const statement =
+    `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ` +
+    `ADD CONSTRAINT ${quoteIdentifier(name)} UNIQUE ${quoteColumnList(spec.columns)}`
+  return sealPlan({
+    statements: [statement],
+    description: `add unique constraint ${name} on ${spec.schema}.${spec.table}`,
+  })
+}
+
+export interface DropConstraintSpec {
+  readonly schema: string
+  readonly table: string
+  readonly name: string
+}
+
+export function compileDropConstraint(spec: DropConstraintSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  assertDdlIdentifier(spec.table)
+  assertDdlName(spec.name, "constraint name")
+  const statement =
+    `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ` +
+    `DROP CONSTRAINT ${quoteIdentifier(spec.name)}`
+  return sealPlan({
+    statements: [statement],
+    description: `drop constraint ${spec.name} on ${spec.schema}.${spec.table}`,
+  })
+}
+
+/**
+ * The frozen foreign-key action allowlist (V02-12). SET DEFAULT is
+ * deliberately excluded; set_null is compiled only when the service has
+ * verified every referencing column is nullable.
+ */
+export type ForeignKeyAction = "no_action" | "restrict" | "cascade" | "set_null"
+
+const FOREIGN_KEY_ACTION_SQL: Readonly<Record<ForeignKeyAction, string>> =
+  Object.freeze({
+    no_action: "NO ACTION",
+    restrict: "RESTRICT",
+    cascade: "CASCADE",
+    set_null: "SET NULL",
+  })
+
+export interface ForeignKeyReferenceSpec {
+  readonly schema: string
+  readonly table: string
+  readonly columns: readonly string[]
+}
+
+export interface AddForeignKeySpec {
+  readonly schema: string
+  readonly table: string
+  readonly columns: readonly string[]
+  readonly references: ForeignKeyReferenceSpec
+  readonly onUpdate: ForeignKeyAction
+  readonly onDelete: ForeignKeyAction
+  /** Explicit name; validated, otherwise a deterministic name is derived. */
+  readonly name?: string
+}
+
+export function compileAddForeignKey(spec: AddForeignKeySpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  assertManageableSchema(spec.references.schema)
+  assertDdlIdentifier(spec.table)
+  assertDdlIdentifier(spec.references.table)
+  assertKeyColumns(spec.columns, "a foreign key")
+  assertKeyColumns(spec.references.columns, "a foreign key target")
+  if (spec.columns.length !== spec.references.columns.length) {
+    throw invalidInput(
+      "a foreign key must reference the same number of columns it constrains",
+    )
+  }
+  if (!Object.hasOwn(FOREIGN_KEY_ACTION_SQL, spec.onUpdate)) {
+    throw invalidInput(`onUpdate action "${spec.onUpdate}" is not allowlisted`)
+  }
+  if (!Object.hasOwn(FOREIGN_KEY_ACTION_SQL, spec.onDelete)) {
+    throw invalidInput(`onDelete action "${spec.onDelete}" is not allowlisted`)
+  }
+  const name =
+    spec.name ?? deterministicObjectName("fkey", spec.table, spec.columns)
+  assertDdlName(name, "constraint name")
+  const statement =
+    `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ` +
+    `ADD CONSTRAINT ${quoteIdentifier(name)} FOREIGN KEY ${quoteColumnList(spec.columns)} ` +
+    `REFERENCES ${quoteIdentifier(spec.references.schema)}.${quoteIdentifier(spec.references.table)} ${quoteColumnList(spec.references.columns)} ` +
+    `ON UPDATE ${FOREIGN_KEY_ACTION_SQL[spec.onUpdate]} ON DELETE ${FOREIGN_KEY_ACTION_SQL[spec.onDelete]}`
+  return sealPlan({
+    statements: [statement],
+    description: `add foreign key ${name} on ${spec.schema}.${spec.table}`,
+  })
+}
+
+// Exposure plans (V02-13). GRANT/REVOKE take no parameters for identifiers,
+// so every identifier is validated and quoted by the audited helper and
+// every literal passes the strict shape checks before quoteLiteral renders
+// it. The registry statements are DML over the migration-owned table and
+// render only validated literals for the same reason.
+
+export interface ColumnPrivilegeGrant {
+  readonly privilege: "SELECT" | "INSERT" | "UPDATE"
+  readonly columns: readonly string[]
+}
+
+export interface GrantRuntimePrivilegesSpec {
+  readonly schema: string
+  readonly table: string
+  /** The restricted runtime role receiving least-privilege grants. */
+  readonly role: string
+  /** Grant USAGE on the schema (idempotent; kept for sibling tables). */
+  readonly grantSchemaUsage: boolean
+  /** Grant DELETE at table level; the data contract requires deleteById. */
+  readonly grantDelete: boolean
+  /** Non-empty column lists only; empty grants are omitted by the service. */
+  readonly columnGrants: readonly ColumnPrivilegeGrant[]
+}
+
+export function compileGrantRuntimePrivileges(
+  spec: GrantRuntimePrivilegesSpec,
+): DdlPlan {
+  assertManageableSchema(spec.schema)
+  assertDdlIdentifier(spec.table)
+  assertDdlIdentifier(spec.role)
+  const statements: string[] = []
+  if (spec.grantSchemaUsage) {
+    statements.push(
+      `GRANT USAGE ON SCHEMA ${quoteIdentifier(spec.schema)} TO ${quoteIdentifier(spec.role)}`,
+    )
+  }
+  if (spec.grantDelete) {
+    statements.push(
+      `GRANT DELETE ON TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} TO ${quoteIdentifier(spec.role)}`,
+    )
+  }
+  for (const grant of spec.columnGrants) {
+    assertKeyColumns(grant.columns, `a ${grant.privilege} grant`)
+    statements.push(
+      `GRANT ${grant.privilege} ${quoteColumnList(grant.columns)} ` +
+        `ON TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} TO ${quoteIdentifier(spec.role)}`,
+    )
+  }
+  if (statements.length === 0) {
+    throw invalidInput("a privilege grant plan needs at least one statement")
+  }
+  return sealPlan({
+    statements,
+    description: `grant runtime privileges on ${spec.schema}.${spec.table}`,
+  })
+}
+
+export interface RevokeRuntimePrivilegesSpec {
+  readonly schema: string
+  readonly table: string
+  readonly role: string
+}
+
+export function compileRevokeRuntimePrivileges(
+  spec: RevokeRuntimePrivilegesSpec,
+): DdlPlan {
+  assertManageableSchema(spec.schema)
+  assertDdlIdentifier(spec.table)
+  assertDdlIdentifier(spec.role)
+  // Table-level REVOKE also removes column-level grants of these privileges,
+  // so the column-level grants applied by compileGrantRuntimePrivileges are
+  // revoked here without tracking their exact shape. USAGE on the schema is
+  // intentionally kept: sibling tables in the same schema may stay exposed.
+  const statement =
+    `REVOKE SELECT, INSERT, UPDATE, DELETE ` +
+    `ON TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} FROM ${quoteIdentifier(spec.role)}`
+  return sealPlan({
+    statements: [statement],
+    description: `revoke runtime privileges on ${spec.schema}.${spec.table}`,
+  })
+}
+
+// Registry literals pass the same strict shape validation as the import
+// payload before they are rendered, so they can never break out of the
+// statement even though PostgreSQL accepts no parameters here.
+function assertRegistryAlias(alias: string): void {
+  if (!/^[a-z][a-z0-9_]{0,62}$/.test(alias)) {
+    throw invalidInput("registry alias is not a valid alias")
+  }
+}
+
+function assertRegistryIdentifier(name: string, context: string): void {
+  if (!SIMPLE_IDENTIFIER.test(name) || name.length > MAX_IDENTIFIER_LENGTH) {
+    throw invalidInput(`${context} is not a valid identifier`)
+  }
+}
+
+export interface MarkExposedSpec {
+  readonly alias: string
+  readonly schema: string
+  readonly table: string
+}
+
+export function compileMarkExposed(spec: MarkExposedSpec): DdlPlan {
+  assertRegistryAlias(spec.alias)
+  assertRegistryIdentifier(spec.schema, "registry schema")
+  assertRegistryIdentifier(spec.table, "registry table")
+  const alias = quoteLiteral(spec.alias)
+  const schema = quoteLiteral(spec.schema)
+  const table = quoteLiteral(spec.table)
+  const statement =
+    `INSERT INTO microjbase.exposure_registry ` +
+    `(alias, schema_name, table_name, exposed, exposed_at, unexposed_at, updated_at) ` +
+    `VALUES (${alias}, ${schema}, ${table}, TRUE, now(), NULL, now()) ` +
+    `ON CONFLICT (schema_name, table_name) DO UPDATE SET ` +
+    `alias = EXCLUDED.alias, exposed = TRUE, exposed_at = now(), ` +
+    `unexposed_at = NULL, updated_at = now()`
+  return sealPlan({
+    statements: [statement],
+    description: "mark a table exposed in the durable exposure registry",
+  })
+}
+
+export interface MarkUnexposedSpec {
+  readonly schema: string
+  readonly table: string
+}
+
+export function compileMarkUnexposed(spec: MarkUnexposedSpec): DdlPlan {
+  assertRegistryIdentifier(spec.schema, "registry schema")
+  assertRegistryIdentifier(spec.table, "registry table")
+  const schema = quoteLiteral(spec.schema)
+  const table = quoteLiteral(spec.table)
+  const statement =
+    `UPDATE microjbase.exposure_registry SET exposed = FALSE, ` +
+    `unexposed_at = now(), updated_at = now() ` +
+    `WHERE schema_name = ${schema} AND table_name = ${table}`
+  return sealPlan({
+    statements: [statement],
+    description: "mark a table unexposed in the durable exposure registry",
+  })
+}
+
 export interface ExecuteOptions {
   readonly idempotencyKey: string
   readonly commandType: string

@@ -27,14 +27,23 @@ import {
   checkRuntimeTablePrivileges,
   checkSchemaAdminRoleSafety,
   checkSchemaOperationLogWriteAccess,
+  checkExposureRegistryWriteAccess,
   checkTableOwnershipAndRls,
   createAuthRepository,
   createPool,
   createPostgresDataRepository,
   createSchemaAdminPool,
+  createSchemaCatalogueReader,
+  createSchemaDdlExecutor,
+  createSchemaExposureService,
+  createSchemaOperationLog,
   createTransactionRunner,
+  createSwappableTableRegistry,
   buildTableRegistry,
+  importInitialExposure,
+  readExposureRegistryState,
   type Pool,
+  type SchemaExposureService,
 } from "./database/index.js"
 import {
   buildServer as buildHttpServer,
@@ -45,6 +54,8 @@ interface StartedServer {
   app: FastifyInstance
   pool: Pool
   adminPool: Pool | null
+  /** Composed admin-lane services; null when the admin lane is disabled. */
+  admin: { exposure: SchemaExposureService } | null
 }
 
 export function buildServer(
@@ -72,17 +83,72 @@ export async function start(): Promise<StartedServer> {
   let started: StartedServer | undefined
   try {
     await assertRuntimeRoleSafety(pool)
-    await assertExposedTableSafety(pool, config.tables)
+
+    // V02-10 (D-018): the durable exposure registry is the sole runtime
+    // exposure source. MICROJBASE_TABLES feeds exactly one import on the
+    // first startup after migration 0006; afterwards the environment
+    // variable can neither add tables nor re-expose an unexposed table.
+    const runtimeQuery: Pool["query"] = (text, values) =>
+      pool.query(text, values)
+    let exposureState = await readExposureRegistryState({ query: runtimeQuery })
+    if (!exposureState.initialized) {
+      // Validate the configured mappings before the one-time import
+      // commits: a bad MICROJBASE_TABLES then fails startup without baking
+      // the mistake into the durable registry, and a later restart after
+      // fixing the configuration imports cleanly.
+      await buildTableRegistry(
+        { mappings: config.tables },
+        { query: runtimeQuery },
+      )
+      exposureState = await importInitialExposure(
+        { query: runtimeQuery },
+        config.tables,
+      )
+    }
+
+    await assertExposedTableSafety(pool, exposureState.exposed)
     if (adminPool) {
       await assertSchemaAdminRoleSafety(adminPool)
       await assertSchemaAdminHistoryWriteAccess(adminPool)
+      await assertSchemaAdminExposureAccess(adminPool)
       await assertSchemaAdminLaneDistinctness(pool, adminPool)
     }
 
-    const registry = await buildTableRegistry(
-      { mappings: config.tables },
-      { query: (text, values) => pool.query(text, values) },
+    const registry = createSwappableTableRegistry(
+      await buildTableRegistry(
+        { mappings: exposureState.exposed },
+        { query: runtimeQuery },
+      ),
     )
+
+    const refreshRuntimeRegistry = async (): Promise<void> => {
+      const state = await readExposureRegistryState({ query: runtimeQuery })
+      registry.replace(
+        await buildTableRegistry(
+          { mappings: state.exposed },
+          { query: runtimeQuery },
+        ),
+      )
+    }
+
+    let admin: StartedServer["admin"] = null
+    if (adminPool) {
+      admin = {
+        exposure: createSchemaExposureService({
+          pool: adminPool,
+          catalogue: createSchemaCatalogueReader({
+            query: (text, values) => adminPool.query(text, values),
+          }),
+          executor: createSchemaDdlExecutor({
+            pool: adminPool,
+            createOperationLog: (query) => createSchemaOperationLog({ query }),
+          }),
+          adminRole: await readSessionRole(adminPool),
+          runtimeRole: await readSessionRole(pool),
+          refreshRuntimeRegistry,
+        }),
+      }
+    }
 
     const authRepository = createAuthRepository(pool)
     const authService = createAuthService(authRepository, {
@@ -112,6 +178,7 @@ export async function start(): Promise<StartedServer> {
         host: config.host,
         port: config.port,
         schemaAdminEnabled: adminPool !== null,
+        exposureImportedAt: exposureState.importedAt,
       },
       "Server listening",
     )
@@ -128,7 +195,7 @@ export async function start(): Promise<StartedServer> {
       },
     ])
 
-    started = { app, pool, adminPool }
+    started = { app, pool, adminPool, admin }
     return started
   } catch (error: unknown) {
     // If startup fails after creating the pools, close them before
@@ -167,9 +234,10 @@ async function assertSchemaAdminRoleSafety(pool: Pool): Promise<void> {
   }
 }
 
-// Migration 0005 cannot grant history access to a role that does not exist
-// yet, so the operator grants it out of band; probe here and fail startup
-// with a clear message rather than letting the first operation die.
+// Migration 0005/0006 cannot grant history or registry access to a role
+// that does not exist yet, so the operator grants it out of band; probe here
+// and fail startup with a clear message rather than letting the first
+// operation die.
 async function assertSchemaAdminHistoryWriteAccess(pool: Pool): Promise<void> {
   const client = await pool.connect()
   try {
@@ -177,6 +245,30 @@ async function assertSchemaAdminHistoryWriteAccess(pool: Pool): Promise<void> {
   } finally {
     client.release()
   }
+}
+
+async function assertSchemaAdminExposureAccess(pool: Pool): Promise<void> {
+  const client = await pool.connect()
+  try {
+    await checkExposureRegistryWriteAccess(client)
+  } finally {
+    client.release()
+  }
+}
+
+async function readSessionRole(pool: Pool): Promise<string> {
+  const result = await pool.query<{ role: string }>(
+    "SELECT current_user AS role",
+  )
+  const row = result.rows[0]
+  if (row === undefined || row.role.length === 0) {
+    throw new AppError(
+      "DATABASE_UNAVAILABLE",
+      "Could not determine database session role",
+      503,
+    )
+  }
+  return row.role
 }
 
 // URL-text comparison happens in parseConfig; this is the second layer that

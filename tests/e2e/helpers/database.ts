@@ -84,6 +84,9 @@ export async function grantRuntimePrivileges(): Promise<void> {
       GRANT SELECT ON microjbase.schema_migrations TO ${E2E_RUNTIME_ROLE};
       GRANT SELECT, INSERT ON microjbase.users TO ${E2E_RUNTIME_ROLE};
       GRANT SELECT, INSERT, UPDATE ON microjbase.sessions TO ${E2E_RUNTIME_ROLE};
+      GRANT SELECT ON microjbase.exposure_registry TO ${E2E_RUNTIME_ROLE};
+      GRANT SELECT ON microjbase.exposure_registry_state TO ${E2E_RUNTIME_ROLE};
+      GRANT EXECUTE ON FUNCTION microjbase.import_exposure_registry(JSONB) TO ${E2E_RUNTIME_ROLE};
       GRANT USAGE ON SCHEMA public TO ${E2E_RUNTIME_ROLE};
       GRANT SELECT, INSERT, UPDATE, DELETE ON public.todos TO ${E2E_RUNTIME_ROLE};
     `)

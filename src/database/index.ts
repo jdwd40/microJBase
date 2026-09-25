@@ -138,6 +138,67 @@ export {
   type SetColumnDefaultCommand,
 } from "./schema-mutations.js"
 export {
+  buildImportPayload,
+  findExposureByAlias,
+  findExposureByTarget,
+  importInitialExposure,
+  readExposureRegistryState,
+  type ExposureRegistryEntry,
+  type ExposureRegistryRow,
+  type ExposureRegistryState,
+} from "./exposure-registry.js"
+export {
+  createSwappableTableRegistry,
+  type SwappableTableRegistry,
+} from "./table-registry.js"
+export {
+  compileAddForeignKey,
+  compileAddUniqueConstraint,
+  compileCreateIndex,
+  compileDropConstraint,
+  compileDropIndex,
+  compileGrantRuntimePrivileges,
+  compileMarkExposed,
+  compileMarkUnexposed,
+  compileRevokeRuntimePrivileges,
+  deterministicObjectName,
+  type AddForeignKeySpec,
+  type AddUniqueConstraintSpec,
+  type ColumnPrivilegeGrant,
+  type CreateIndexSpec,
+  type DropConstraintSpec,
+  type DropIndexSpec,
+  type ForeignKeyAction,
+  type ForeignKeyReferenceSpec,
+  type GrantRuntimePrivilegesSpec,
+  type MarkExposedSpec,
+  type MarkUnexposedSpec,
+  type RevokeRuntimePrivilegesSpec,
+} from "./schema-ddl.js"
+export {
+  createSchemaConstraintService,
+  type AddForeignKeyCommand,
+  type AddUniqueConstraintCommand,
+  type ConstraintCommandBase,
+  type CreateIndexCommand,
+  type DropConstraintCommand,
+  type DropIndexCommand,
+  type ForeignKeyReferenceCommand,
+  type SchemaConstraintService,
+  type SchemaConstraintServiceDependencies,
+} from "./schema-constraints.js"
+export {
+  checkExposureRegistryWriteAccess,
+  createSchemaExposureService,
+  verifyExposureCandidate,
+  type ExposeTableCommand,
+  type ExposureCommandBase,
+  type ExposureVerification,
+  type SchemaExposureService,
+  type SchemaExposureServiceDependencies,
+  type UnexposeTableCommand,
+} from "./schema-exposure.js"
+export {
   type ColumnMetadata,
   type VerifiedTableMetadata,
 } from "./table-types.js"
