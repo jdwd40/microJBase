@@ -12,6 +12,7 @@ import { pathToFileURL } from "node:url"
 
 import type { FastifyInstance } from "fastify"
 
+import type { TableRegistry } from "./contracts/index.js"
 import {
   AppError,
   installShutdownHandlers,
@@ -48,6 +49,7 @@ import {
   type SchemaExposureService,
   type SchemaPolicyService,
   type SchemaRlsService,
+  type SwappableTableRegistry,
 } from "./database/index.js"
 import {
   buildServer as buildHttpServer,
@@ -70,6 +72,28 @@ export function buildServer(
   deps: ServerDependencies,
 ): Promise<FastifyInstance> {
   return buildHttpServer(deps)
+}
+
+/**
+ * Build the post-commit runtime-registry refresher. The rebuild (read the
+ * durable exposure registry, then verify and build the snapshot) is
+ * asynchronous; each call captures a monotonic ticket first and swaps the
+ * rebuilt snapshot in only when no newer refresh has started since. Without
+ * the ticket, a slower older read could finish last and replace a fresh
+ * snapshot with a stale one (JDW-27).
+ */
+export function createRuntimeRegistryRefresher(deps: {
+  rebuild: () => Promise<TableRegistry>
+  registry: SwappableTableRegistry
+}): () => Promise<void> {
+  let latestTicket = 0
+  return async () => {
+    const ticket = ++latestTicket
+    const next = await deps.rebuild()
+    if (ticket === latestTicket) {
+      deps.registry.replace(next)
+    }
+  }
 }
 
 export async function start(): Promise<StartedServer> {
@@ -129,15 +153,16 @@ export async function start(): Promise<StartedServer> {
       ),
     )
 
-    const refreshRuntimeRegistry = async (): Promise<void> => {
-      const state = await readExposureRegistryState({ query: runtimeQuery })
-      registry.replace(
-        await buildTableRegistry(
+    const refreshRuntimeRegistry = createRuntimeRegistryRefresher({
+      rebuild: async () => {
+        const state = await readExposureRegistryState({ query: runtimeQuery })
+        return buildTableRegistry(
           { mappings: state.exposed },
           { query: runtimeQuery },
-        ),
-      )
-    }
+        )
+      },
+      registry,
+    })
 
     let admin: StartedServer["admin"] = null
     if (adminPool) {

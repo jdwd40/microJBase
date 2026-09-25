@@ -38,7 +38,7 @@ export async function checkRuntimeRoleSafety(
     rolbypassrls: boolean
   }>(`
     SELECT rolname, rolsuper, rolbypassrls
-    FROM pg_roles
+    FROM pg_catalog.pg_roles
     WHERE rolname = current_user
   `)
 
@@ -128,7 +128,7 @@ async function assertRequiredPrivileges(
   for (const required of REQUIRED_PRIVILEGES) {
     if (required.kind === "schema") {
       const result = await client.query<{ has: boolean }>(
-        "SELECT has_schema_privilege(current_user, $1, $2) AS has",
+        "SELECT pg_catalog.has_schema_privilege(current_user, $1, $2) AS has",
         [required.schema, required.privilege],
       )
       const row = result.rows[0]
@@ -142,7 +142,7 @@ async function assertRequiredPrivileges(
       }
     } else {
       const result = await client.query<{ has: boolean }>(
-        "SELECT has_table_privilege(current_user, $1, $2) AS has",
+        "SELECT pg_catalog.has_table_privilege(current_user, $1, $2) AS has",
         [`${required.schema}.${required.table}`, required.privilege],
       )
       const row = result.rows[0]
@@ -199,10 +199,10 @@ export async function checkTableOwnershipAndRls(
       relforcerowsecurity: boolean
     }>(
       `
-        SELECT c.relname, n.nspname, pg_get_userbyid(c.relowner) AS relowner,
+        SELECT c.relname, n.nspname, pg_catalog.pg_get_userbyid(c.relowner) AS relowner,
                c.relrowsecurity, c.relforcerowsecurity
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'
       `,
       [schema, table],
@@ -274,10 +274,10 @@ export async function checkRuntimeTablePrivileges(
     }>(
       `
         SELECT
-          has_table_privilege(current_user, $1, 'SELECT') AS has_select,
-          has_table_privilege(current_user, $1, 'INSERT') AS has_insert,
-          has_table_privilege(current_user, $1, 'UPDATE') AS has_update,
-          has_table_privilege(current_user, $1, 'DELETE') AS has_delete
+          pg_catalog.has_table_privilege(current_user, $1, 'SELECT') AS has_select,
+          pg_catalog.has_table_privilege(current_user, $1, 'INSERT') AS has_insert,
+          pg_catalog.has_table_privilege(current_user, $1, 'UPDATE') AS has_update,
+          pg_catalog.has_table_privilege(current_user, $1, 'DELETE') AS has_delete
       `,
       [`${schema}.${table}`],
     )
@@ -320,19 +320,19 @@ export async function checkApplicablePolicies(
       `
         SELECT pol.polname AS policyname,
                ARRAY(
-                 SELECT pg_get_userbyid(role_member)
-                 FROM unnest(pol.polroles) AS role_member
+                 SELECT pg_catalog.pg_get_userbyid(role_member)
+                 FROM pg_catalog.unnest(pol.polroles) AS role_member
                ) AS roles,
                (
                  pol.polroles = ARRAY[0]::oid[]
                  OR EXISTS (
-                   SELECT 1 FROM unnest(pol.polroles) AS policy_role
-                   WHERE pg_has_role(current_user, policy_role, 'MEMBER')
+                   SELECT 1 FROM pg_catalog.unnest(pol.polroles) AS policy_role
+                   WHERE pg_catalog.pg_has_role(current_user, policy_role, 'MEMBER')
                  )
                ) AS applicable_to_current_user
-        FROM pg_policy pol
-        JOIN pg_class c ON c.oid = pol.polrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
+        FROM pg_catalog.pg_policy pol
+        JOIN pg_catalog.pg_class c ON c.oid = pol.polrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = $1 AND c.relname = $2
       `,
       [schema, table],

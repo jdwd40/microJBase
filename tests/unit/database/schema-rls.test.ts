@@ -266,7 +266,11 @@ function rejection(
 }
 
 function statementsOf(call: CapturedCall | undefined): readonly string[] {
-  return (call?.plan as { statements: readonly string[] }).statements
+  const plan = call?.plan as
+    | { statements: readonly string[] }
+    | readonly { statements: readonly string[] }[]
+  const plans = Array.isArray(plan) ? plan : [plan]
+  return plans.flatMap((entry) => entry.statements)
 }
 
 const OWNERSHIP_COMPARISON =
@@ -300,12 +304,18 @@ describe("compileEnableRowSecurity", () => {
 })
 
 describe("compileDisableRowSecurity", () => {
-  it("drops the FORCE flag before disabling row-level security", () => {
+  it("leads with the locked exposure guard, then drops FORCE before disabling", () => {
     const plan = compileDisableRowSecurity({ schema: "app", table: "items" })
-    expect(plan.statements).toEqual([
+    expect(plan.statements).toHaveLength(3)
+    const [guard, noForce, disable] = plan.statements
+    expect(guard).toContain("DO $microjbase$")
+    expect(guard).toContain("FROM microjbase.exposure_registry")
+    expect(guard).toContain("exposed = TRUE")
+    expect(guard).toContain("9C003")
+    expect(noForce).toBe(
       'ALTER TABLE "app"."items" NO FORCE ROW LEVEL SECURITY',
-      'ALTER TABLE "app"."items" DISABLE ROW LEVEL SECURITY',
-    ])
+    )
+    expect(disable).toBe('ALTER TABLE "app"."items" DISABLE ROW LEVEL SECURITY')
   })
 
   it("refuses internal schemas before any SQL exists", () => {
@@ -445,7 +455,14 @@ describe("createSchemaRlsService", () => {
     })
     expect(calls).toHaveLength(1)
     expect(calls[0]?.options.commandType).toBe("schema.rls.disable")
-    expect(statementsOf(calls[0])).toEqual([
+    const statements = statementsOf(calls[0])
+    // The compiled disable leads with the locked exposure guard: it
+    // re-checks the durable registry inside the advisory lock because the
+    // in-memory registry the preflight read can be stale (JDW-27).
+    expect(statements[0]).toContain("FROM microjbase.exposure_registry")
+    expect(statements[0]).toContain("schema_name = 'app'")
+    expect(statements[0]).toContain("table_name = 'items'")
+    expect(statements.slice(1)).toEqual([
       'ALTER TABLE "app"."items" NO FORCE ROW LEVEL SECURITY',
       'ALTER TABLE "app"."items" DISABLE ROW LEVEL SECURITY',
     ])

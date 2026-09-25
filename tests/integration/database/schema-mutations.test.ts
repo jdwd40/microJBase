@@ -206,6 +206,11 @@ beforeAll(async () => {
     await admin.query(
       `GRANT USAGE ON SEQUENCE microjbase.schema_operations_id_seq TO ${quoteIdentifier(ADMIN_ROLE)}`,
     )
+    // The locked exposure guard compiled into every structural mutation reads
+    // the durable registry, so the admin role needs SELECT on it.
+    await admin.query(
+      `GRANT SELECT ON microjbase.exposure_registry TO ${quoteIdentifier(ADMIN_ROLE)}`,
+    )
   })
 
   adminPool = createPool({ databaseUrl: adminRoleUrl(), maxConnections: 5 })
@@ -237,6 +242,9 @@ afterAll(async () => {
     )
     await admin.query(
       `REVOKE ALL ON SEQUENCE microjbase.schema_operations_id_seq FROM ${quoteIdentifier(ADMIN_ROLE)}`,
+    )
+    await admin.query(
+      `REVOKE ALL ON microjbase.exposure_registry FROM ${quoteIdentifier(ADMIN_ROLE)}`,
     )
     await admin.query(
       `REVOKE USAGE ON SCHEMA microjbase FROM ${quoteIdentifier(ADMIN_ROLE)}`,

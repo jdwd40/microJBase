@@ -297,6 +297,11 @@ export function createSchemaRlsService(
         table: input.table,
         confirmed: true,
       }
+      // The compiled plan itself leads with the locked exposure guard: the
+      // in-memory registry the preflight read can be stale by the time the
+      // executor reaches the advisory lock, so the durable registry is
+      // re-checked as the first statement and the disable fails closed there
+      // instead. No separate guard plan is prepended here.
       return execute(plan, {
         idempotencyKey: input.idempotencyKey,
         commandType: "schema.rls.disable",

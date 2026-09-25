@@ -160,6 +160,28 @@ function fakePool(holds: { rows: boolean; nulls: boolean }): Pool {
   } as unknown as Pool
 }
 
+function statementsOf(
+  call: { readonly plan: unknown } | undefined,
+): readonly string[] {
+  const plan = call?.plan as
+    | { statements: readonly string[] }
+    | readonly { statements: readonly string[] }[]
+  const plans = Array.isArray(plan) ? plan : [plan]
+  return plans.flatMap((entry) => entry.statements)
+}
+
+// Every structural mutation plan now leads with the locked exposure guard
+// (JDW-27): assert it re-checks the durable registry, then return the
+// remaining mutation statements.
+function expectGuarded(
+  statements: readonly string[],
+  table = "notes",
+): readonly string[] {
+  expect(statements[0]).toContain("FROM microjbase.exposure_registry")
+  expect(statements[0]).toContain(`table_name = '${table}'`)
+  return statements.slice(1)
+}
+
 function exposedRegistry(schema: string, table: string) {
   return {
     get: () => null,
@@ -517,9 +539,9 @@ describe("renameTable", () => {
     })
     const call = calls[0]
     expect(call?.options.commandType).toBe("schema.table.rename")
-    expect(
-      (call?.plan as { statements: readonly string[] }).statements,
-    ).toEqual(['ALTER TABLE "app"."notes" RENAME TO "documents"'])
+    expect(expectGuarded(statementsOf(call))).toEqual([
+      'ALTER TABLE "app"."notes" RENAME TO "documents"',
+    ])
     expect(call?.options.command).toEqual({
       schema: APP_SCHEMA,
       table: "notes",
@@ -603,9 +625,9 @@ describe("dropTable", () => {
       table: "notes",
       confirmed: true,
     })
-    expect(
-      (call?.plan as { statements: readonly string[] }).statements,
-    ).toEqual(['DROP TABLE "app"."notes"'])
+    expect(expectGuarded(statementsOf(call))).toEqual([
+      'DROP TABLE "app"."notes"',
+    ])
   })
 
   it("refuses without the exact confirmation value", async () => {
@@ -690,11 +712,9 @@ describe("addColumn", () => {
     })
     const call = calls[0]
     expect(call?.options.commandType).toBe("schema.column.add")
-    expect(
-      (call?.plan as { statements: readonly string[] }).statements[0],
-    ).toBe(
+    expect(expectGuarded(statementsOf(call))).toEqual([
       'ALTER TABLE "app"."notes" ADD COLUMN "priority" integer NOT NULL DEFAULT 0',
-    )
+    ])
   })
 
   it("refuses duplicate columns, the id name, and NOT NULL without default on populated tables", async () => {
@@ -800,9 +820,9 @@ describe("renameColumn", () => {
       newName: "heading",
     })
     expect(calls[0]?.options.commandType).toBe("schema.column.rename")
-    expect(
-      (calls[0]?.plan as { statements: readonly string[] }).statements,
-    ).toEqual(['ALTER TABLE "app"."notes" RENAME COLUMN "title" TO "heading"'])
+    expect(expectGuarded(statementsOf(calls[0]))).toEqual([
+      'ALTER TABLE "app"."notes" RENAME COLUMN "title" TO "heading"',
+    ])
   })
 
   it("refuses generated, identity, primary-key, and id-named targets", async () => {
@@ -864,9 +884,9 @@ describe("dropColumn", () => {
       confirm: "app.notes.title",
     })
     expect(calls[0]?.options.commandType).toBe("schema.column.drop")
-    expect(
-      (calls[0]?.plan as { statements: readonly string[] }).statements,
-    ).toEqual(['ALTER TABLE "app"."notes" DROP COLUMN "title"'])
+    expect(expectGuarded(statementsOf(calls[0]))).toEqual([
+      'ALTER TABLE "app"."notes" DROP COLUMN "title"',
+    ])
   })
 
   it("refuses without the exact confirmation value", async () => {
@@ -946,9 +966,7 @@ describe("column defaults, nullability, and type changes", () => {
       default: { kind: "literal", value: "untitled" },
     })
     expect(calls[0]?.options.commandType).toBe("schema.column.default.set")
-    expect(
-      (calls[0]?.plan as { statements: readonly string[] }).statements,
-    ).toEqual([
+    expect(expectGuarded(statementsOf(calls[0]))).toEqual([
       'ALTER TABLE "app"."notes" ALTER COLUMN "title" SET DEFAULT \'untitled\'::text',
     ])
   })
@@ -1058,9 +1076,9 @@ describe("column defaults, nullability, and type changes", () => {
       table: "notes",
       column: "title",
     })
-    expect(
-      (calls[0]?.plan as { statements: readonly string[] }).statements,
-    ).toEqual(['ALTER TABLE "app"."notes" ALTER COLUMN "title" SET NOT NULL'])
+    expect(expectGuarded(statementsOf(calls[0]))).toEqual([
+      'ALTER TABLE "app"."notes" ALTER COLUMN "title" SET NOT NULL',
+    ])
   })
 
   it("changes a type only within the frozen matrix", async () => {
@@ -1087,12 +1105,12 @@ describe("column defaults, nullability, and type changes", () => {
       fromType: "integer",
       toType: "bigint",
     })
-    const statements = (call?.plan as { statements: readonly string[] })
-      .statements
-    expect(statements[1]).toBe(
+    const statements = statementsOf(call)
+    expect(statements[0]).toContain("FROM microjbase.exposure_registry")
+    expect(statements[1]).toContain("format_type(")
+    expect(statements[2]).toBe(
       'ALTER TABLE "app"."notes" ALTER COLUMN "priority" TYPE bigint',
     )
-    expect(statements[0]).toContain("format_type(")
   })
 
   it("refuses type changes with defaults, dependencies, or outside the matrix", async () => {
@@ -1272,9 +1290,9 @@ describe("replay reconstructs the compiled statement from the recorded command",
       fromType: "integer",
       toType: "bigint",
     })
-    const statements = (call?.plan as { statements: readonly string[] })
-      .statements
-    expect(statements[1]).toBe(
+    const statements = statementsOf(call)
+    expect(statements[0]).toContain("FROM microjbase.exposure_registry")
+    expect(statements[2]).toBe(
       'ALTER TABLE "app"."notes" ALTER COLUMN "priority" TYPE bigint',
     )
   })
@@ -1322,9 +1340,7 @@ describe("replay reconstructs the compiled statement from the recorded command",
       default: { kind: "literal", value: "2026-01-01" },
       type: "date",
     })
-    expect(
-      (call?.plan as { statements: readonly string[] }).statements,
-    ).toEqual([
+    expect(expectGuarded(statementsOf(call))).toEqual([
       'ALTER TABLE "app"."notes" ALTER COLUMN "due_on" SET DEFAULT \'2026-01-01\'::date',
     ])
   })

@@ -149,11 +149,29 @@ describe("compileAddForeignKey", () => {
       onUpdate: "restrict",
       onDelete: "cascade",
     })
-    expectStatement(
-      plan,
+    // ON DELETE CASCADE rewrites rows in the referencing table as its owner,
+    // bypassing row security, so the plan leads with the locked exposure
+    // guard for both ends of the key (JDW-27).
+    expect(plan.statements).toHaveLength(3)
+    expect(plan.statements[0]).toContain("FROM microjbase.exposure_registry")
+    expect(plan.statements[0]).toContain("table_name = 'orders'")
+    expect(plan.statements[1]).toContain("table_name = 'users'")
+    expect(plan.statements[2]).toBe(
       'ALTER TABLE "app"."orders" ADD CONSTRAINT "mjb_orders_user_id_fkey_bad656d5" ' +
         'FOREIGN KEY ("user_id") REFERENCES "app"."users" ("id") ' +
         "ON UPDATE RESTRICT ON DELETE CASCADE",
+    )
+  })
+
+  it("does not guard actions that cannot cascade or nullify", () => {
+    const plan = compileAddForeignKey({
+      ...base,
+      onUpdate: "restrict",
+      onDelete: "no_action",
+    })
+    expect(plan.statements).toHaveLength(1)
+    expect(plan.statements[0]).toContain(
+      "ON UPDATE RESTRICT ON DELETE NO ACTION",
     )
   })
 
@@ -163,7 +181,11 @@ describe("compileAddForeignKey", () => {
       onUpdate: "no_action",
       onDelete: "set_null",
     })
-    expect(describePlan(plan)[0]).toContain(
+    const statements = describePlan(plan)
+    // set_null is guarded on both ends of the key, so the action statement
+    // is the last one.
+    expect(statements).toHaveLength(3)
+    expect(statements[statements.length - 1]).toContain(
       "ON UPDATE NO ACTION ON DELETE SET NULL",
     )
   })

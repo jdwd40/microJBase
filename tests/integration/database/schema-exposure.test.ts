@@ -20,6 +20,8 @@ import {
   createPool,
   type ManagedColumnSpec,
   findExposureByTarget,
+  ownershipPolicyName,
+  ownershipPolicyTemplateShape,
   readExposureRegistryState,
   type Pool,
   type SchemaExposureService,
@@ -144,18 +146,28 @@ async function createManagedTable(
   expect(outcome.replayed).toBe(false)
 }
 
-/** Managed table hardened for exposure: RLS + FORCE + owner policy. */
+/** Managed table hardened for exposure: RLS + FORCE + the four module-owned
+ * ownership policies exposure verification requires. */
 async function hardenTable(table: string): Promise<void> {
   await withClient(adminRoleUrl(), async (client) => {
     const qualified = `${quoteIdentifier(APP_SCHEMA)}.${quoteIdentifier(table)}`
     await client.query(`ALTER TABLE ${qualified} ENABLE ROW LEVEL SECURITY`)
     await client.query(`ALTER TABLE ${qualified} FORCE ROW LEVEL SECURITY`)
-    await client.query(
-      `CREATE POLICY ${quoteIdentifier(`${table}_owner_all`)} ON ${qualified}
-         FOR ALL TO PUBLIC
-         USING (owner = nullif(current_setting('microjbase.user_id', true), '')::uuid)
-         WITH CHECK (owner = nullif(current_setting('microjbase.user_id', true), '')::uuid)`,
-    )
+    const comparison =
+      "(owner = nullif(current_setting('microjbase.user_id', true), '')::uuid)"
+    for (const template of ["read", "insert", "update", "delete"] as const) {
+      const shape = ownershipPolicyTemplateShape(template)
+      let statement =
+        `CREATE POLICY ${quoteIdentifier(ownershipPolicyName(table, "owner", template))} ` +
+        `ON ${qualified} FOR ${shape.command} TO PUBLIC`
+      if (shape.using) {
+        statement += ` USING ${comparison}`
+      }
+      if (shape.withCheck) {
+        statement += ` WITH CHECK ${comparison}`
+      }
+      await client.query(statement)
+    }
   })
 }
 
@@ -469,7 +481,7 @@ describe("expose", () => {
         table: "no_policy",
         alias: "no_policy",
       }),
-    ).rejects.toThrow(/policies/)
+    ).rejects.toThrow(/no managed read ownership policy/)
 
     // Non-uuid primary key named id.
     await withClient(adminRoleUrl(), async (client) => {
@@ -1093,7 +1105,7 @@ describe("hostile search_path (R5 review, JDW-23)", () => {
           table: "decoy_no_policy",
           alias: "decoy_no_policy",
         }),
-      ).rejects.toThrow(/policies/)
+      ).rejects.toThrow(/no managed read ownership policy/)
       await expect(
         hostile.expose({
           idempotencyKey: "v0213-decoy-text-pk",

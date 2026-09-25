@@ -12,6 +12,9 @@ import type {
 import {
   checkExposureRegistryWriteAccess,
   createSwappableTableRegistry,
+  type OwnershipComparisonProbe,
+  ownershipPolicyName,
+  ownershipPolicyTemplateShape,
   verifyExposureCandidate,
 } from "../../../src/database/index.js"
 
@@ -73,7 +76,70 @@ interface RecordedQuery {
   values: readonly unknown[]
 }
 
-function probeFake() {
+// PostgreSQL's deparsed rendering of the frozen ownership comparison the
+// module compiles into its policies (verified on PostgreSQL 18.6).
+function ownershipExpr(column: string): string {
+  return `(${column} = (NULLIF(current_setting('microjbase.user_id'::text, true), ''::text))::uuid)`
+}
+
+interface FakePolicyRow {
+  policy_name: string
+  command: string
+  permissive: boolean
+  using_expression: string | null
+  check_expression: string | null
+}
+
+// The four module-owned ownership policies the verification requires, bound
+// to the "id" ownership column of the fake table.
+function moduleOwnershipPolicies(table: string): FakePolicyRow[] {
+  const expr = ownershipExpr("id")
+  return [
+    {
+      policy_name: ownershipPolicyName(table, "id", "read"),
+      command: "r",
+      permissive: true,
+      using_expression: expr,
+      check_expression: null,
+    },
+    {
+      policy_name: ownershipPolicyName(table, "id", "insert"),
+      command: "a",
+      permissive: true,
+      using_expression: null,
+      check_expression: expr,
+    },
+    {
+      policy_name: ownershipPolicyName(table, "id", "update"),
+      command: "w",
+      permissive: true,
+      using_expression: expr,
+      check_expression: expr,
+    },
+    {
+      policy_name: ownershipPolicyName(table, "id", "delete"),
+      command: "d",
+      permissive: true,
+      using_expression: expr,
+      check_expression: null,
+    },
+  ]
+}
+
+// The probe stands in for the service's rolled-back probe policy: it returns
+// the same rendering the fake policy rows above carry for the frozen
+// comparison, so a module-named policy row verifies and anything else fails.
+const fakeProbe: OwnershipComparisonProbe = {
+  async render(_schema, _table, column, template) {
+    const shape = ownershipPolicyTemplateShape(template)
+    return {
+      using: shape.using ? ownershipExpr(column) : null,
+      withCheck: shape.withCheck ? ownershipExpr(column) : null,
+    }
+  },
+}
+
+function probeFake(extraPolicies: FakePolicyRow[] = []) {
   const recorded: RecordedQuery[] = []
   const query = async <R extends pg.QueryResultRow>(
     text: string,
@@ -96,7 +162,7 @@ function probeFake() {
     if (text.includes("pol.polroles")) {
       return {
         ...result,
-        rows: [{ applicable: true }],
+        rows: [...moduleOwnershipPolicies("items"), ...extraPolicies],
       } as unknown as pg.QueryResult<R>
     }
     if (text.includes("i.indisprimary")) {
@@ -153,7 +219,13 @@ const UNQUALIFIED_CATALOG_REF =
 describe("verifyExposureCandidate", () => {
   it("schema-qualifies every catalogue reference in the probes", async () => {
     const { query, recorded } = probeFake()
-    await verifyExposureCandidate(query, "microjbase_runtime", "app", "items")
+    await verifyExposureCandidate(
+      query,
+      "microjbase_runtime",
+      "app",
+      "items",
+      fakeProbe,
+    )
     expect(recorded).toHaveLength(5)
     for (const call of recorded) {
       expect(call.text).not.toMatch(UNQUALIFIED_CATALOG_REF)
@@ -167,6 +239,7 @@ describe("verifyExposureCandidate", () => {
       "microjbase_runtime",
       "app",
       "items",
+      fakeProbe,
     )
     // bytea is not a supported data-contract type, so it receives no grant
     // at all; generated/identity columns stay readable but not writable.
@@ -178,6 +251,92 @@ describe("verifyExposureCandidate", () => {
     ])
     expect(verification.insertableColumns).toEqual(["id", "title"])
     expect(verification.updatableColumns).toEqual(["title"])
+  })
+
+  it("rejects a broader permissive policy beside the ownership policy", async () => {
+    // A permissive USING (true) policy applicable to the runtime role ORs
+    // with the ownership policy and would expose one tenant's rows to
+    // another, so verification fails closed (JDW-27).
+    const broad: FakePolicyRow = {
+      policy_name: "operator_broad_select",
+      command: "r",
+      permissive: true,
+      using_expression: "true",
+      check_expression: null,
+    }
+    const { query } = probeFake([broad])
+    await expect(
+      verifyExposureCandidate(
+        query,
+        "microjbase_runtime",
+        "app",
+        "items",
+        fakeProbe,
+      ),
+    ).rejects.toThrow(/other than the managed read ownership policy/)
+  })
+
+  it("requires the managed ownership policy for every exercised command", async () => {
+    // Without the module-owned delete ownership policy, the strict check
+    // fails closed even though a permissive policy still applies.
+    const rows = moduleOwnershipPolicies("items").filter(
+      (row) => row.command !== "d",
+    )
+    const recorded: RecordedQuery[] = []
+    const query = (async <R extends pg.QueryResultRow>(
+      text: string,
+      values: readonly unknown[] = [],
+    ): Promise<pg.QueryResult<R>> => {
+      recorded.push({ text, values: [...values] })
+      const result = { rowCount: 0, command: "", oid: 0, fields: [] }
+      if (text.includes("AS exists")) {
+        return { ...result, rows: [{ exists: true }] } as never
+      }
+      if (text.includes("relforcerowsecurity")) {
+        return {
+          ...result,
+          rows: [{ relrowsecurity: true, relforcerowsecurity: true }],
+        } as never
+      }
+      if (text.includes("pol.polroles")) {
+        return { ...result, rows: rows } as never
+      }
+      if (text.includes("i.indisprimary")) {
+        return {
+          ...result,
+          rows: [{ column_name: "id", data_type: "uuid" }],
+        } as never
+      }
+      if (text.includes("a.attidentity")) {
+        return {
+          ...result,
+          rows: [
+            {
+              column_name: "id",
+              data_type: "uuid",
+              attgenerated: "",
+              attidentity: "",
+            },
+            {
+              column_name: "title",
+              data_type: "text",
+              attgenerated: "",
+              attidentity: "",
+            },
+          ],
+        } as never
+      }
+      throw new Error(`unexpected statement: ${text}`)
+    }) as unknown as Parameters<typeof verifyExposureCandidate>[0]
+    await expect(
+      verifyExposureCandidate(
+        query,
+        "microjbase_runtime",
+        "app",
+        "items",
+        fakeProbe,
+      ),
+    ).rejects.toThrow(/no managed delete ownership policy/)
   })
 })
 

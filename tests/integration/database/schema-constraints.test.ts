@@ -117,6 +117,7 @@ async function dropAdminRole(admin: import("pg").Client): Promise<void> {
       IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${ADMIN_ROLE}') THEN
         EXECUTE 'REVOKE ALL ON microjbase.schema_operations FROM "${ADMIN_ROLE}"';
         EXECUTE 'REVOKE ALL ON SEQUENCE microjbase.schema_operations_id_seq FROM "${ADMIN_ROLE}"';
+        EXECUTE 'REVOKE ALL ON microjbase.exposure_registry FROM "${ADMIN_ROLE}"';
         EXECUTE 'REVOKE USAGE ON SCHEMA microjbase FROM "${ADMIN_ROLE}"';
         EXECUTE 'DROP ROLE "${ADMIN_ROLE}"';
       END IF;
@@ -153,6 +154,11 @@ beforeAll(async () => {
     )
     await admin.query(
       `GRANT USAGE ON SEQUENCE microjbase.schema_operations_id_seq TO ${quoteIdentifier(ADMIN_ROLE)}`,
+    )
+    // The locked exposure guard compiled into cascading foreign keys reads
+    // the durable registry, so the admin role needs SELECT on it.
+    await admin.query(
+      `GRANT SELECT ON microjbase.exposure_registry TO ${quoteIdentifier(ADMIN_ROLE)}`,
     )
   })
 

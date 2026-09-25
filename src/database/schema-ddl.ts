@@ -558,6 +558,20 @@ const CATALOGUE_TYPE_RENDERINGS: Readonly<Record<DdlColumnType, string>> =
 // in-progress-style conflict so a stale compilation fails closed.
 export const STALE_SOURCE_TYPE_SQLSTATE = "9C001"
 
+// SQLSTATE raised by the locked exposure guard compiled into the first
+// statement of every structural mutation, RLS disablement, and cascading
+// foreign-key plan: the durable exposure registry lists the target as
+// exposed, so the command must fail closed inside the advisory lock instead
+// of trusting the in-memory registry the preflight read earlier (JDW-27).
+export const EXPOSED_MUTATION_GUARD_SQLSTATE = "9C003"
+
+// SQLSTATE raised by the locked exposure-prerequisite guard compiled into
+// every expose plan: the target is already exposed, or row security is no
+// longer enabled and forced, or no policy applies to the runtime role. The
+// whole exposure transaction rolls back, so an expose can never commit
+// against drifted RLS state or rename the public alias of an exposed table.
+export const EXPOSURE_GUARD_SQLSTATE = "9C004"
+
 export function compileRenameTable(spec: RenameTableSpec): DdlPlan {
   assertManageableSchema(spec.schema)
   const statement = `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} RENAME TO ${quoteIdentifier(spec.newName)}`
@@ -938,13 +952,32 @@ export function compileAddForeignKey(spec: AddForeignKeySpec): DdlPlan {
   const name =
     spec.name ?? deterministicObjectName("fkey", spec.table, spec.columns)
   assertDdlName(name, "constraint name")
-  const statement =
+  // A cascading or nullifying referential action rewrites rows in the
+  // referencing table without consulting its row-security policies (the
+  // action fires as the table owner), so it can delete or null another
+  // tenant's rows even under FORCE RLS. Refuse the action inside the same
+  // advisory lock when either end of the key is exposed; unexposed tables
+  // keep the frozen action allowlist (JDW-27).
+  const statements: string[] = []
+  if (
+    spec.onUpdate === "cascade" ||
+    spec.onUpdate === "set_null" ||
+    spec.onDelete === "cascade" ||
+    spec.onDelete === "set_null"
+  ) {
+    statements.push(
+      exposedGuardStatement(spec.schema, spec.table),
+      exposedGuardStatement(spec.references.schema, spec.references.table),
+    )
+  }
+  statements.push(
     `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ` +
-    `ADD CONSTRAINT ${quoteIdentifier(name)} FOREIGN KEY ${quoteColumnList(spec.columns)} ` +
-    `REFERENCES ${quoteIdentifier(spec.references.schema)}.${quoteIdentifier(spec.references.table)} ${quoteColumnList(spec.references.columns)} ` +
-    `ON UPDATE ${FOREIGN_KEY_ACTION_SQL[spec.onUpdate]} ON DELETE ${FOREIGN_KEY_ACTION_SQL[spec.onDelete]}`
+      `ADD CONSTRAINT ${quoteIdentifier(name)} FOREIGN KEY ${quoteColumnList(spec.columns)} ` +
+      `REFERENCES ${quoteIdentifier(spec.references.schema)}.${quoteIdentifier(spec.references.table)} ${quoteColumnList(spec.references.columns)} ` +
+      `ON UPDATE ${FOREIGN_KEY_ACTION_SQL[spec.onUpdate]} ON DELETE ${FOREIGN_KEY_ACTION_SQL[spec.onDelete]}`,
+  )
   return sealPlan({
-    statements: [statement],
+    statements,
     description: `add foreign key ${name} on ${spec.schema}.${spec.table}`,
   })
 }
@@ -1209,8 +1242,11 @@ export function compileEnableRowSecurity(spec: RowSecurityTargetSpec): DdlPlan {
 
 // Disablement drops the FORCE flag before disabling RLS so the relforcerow
 // security bit never outlives the row-security bit inside the same
-// transaction. Whether the command may run at all is a service-level guard:
-// the compiler only renders the statements.
+// transaction. The plan itself leads with the locked exposure guard: the
+// process-local registry the service preflight read can be stale by the time
+// the executor reaches the advisory lock, so the durable registry is
+// re-checked as the first statement and the disable fails closed there
+// instead (R6, JDW-28).
 export function compileDisableRowSecurity(
   spec: RowSecurityTargetSpec,
 ): DdlPlan {
@@ -1219,6 +1255,7 @@ export function compileDisableRowSecurity(
   const target = `${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)}`
   return sealPlan({
     statements: [
+      exposedGuardStatement(spec.schema, spec.table),
       `ALTER TABLE ${target} NO FORCE ROW LEVEL SECURITY`,
       `ALTER TABLE ${target} DISABLE ROW LEVEL SECURITY`,
     ],
@@ -1250,6 +1287,17 @@ const OWNERSHIP_POLICY_TEMPLATES: Readonly<
   update: { command: "UPDATE", using: true, withCheck: true },
   delete: { command: "DELETE", using: true, withCheck: false },
 })
+
+/**
+ * The clause shape each ownership template renders. Exposure verification
+ * (schema-exposure.ts) re-derives the exact expressions a managed policy
+ * must carry from this same table, so the two can never drift apart.
+ */
+export function ownershipPolicyTemplateShape(
+  template: OwnershipPolicyTemplate,
+): OwnershipPolicyTemplateShape {
+  return OWNERSHIP_POLICY_TEMPLATES[template]
+}
 
 // The frozen ownership comparison every template applies to the validated
 // UUID ownership column. The transaction-local GUC carries the request
@@ -1289,7 +1337,14 @@ export function ownershipPolicyName(
   return deterministicObjectName(template, table, [column])
 }
 
-function compileOwnershipComparison(column: string): string {
+/**
+ * Render the frozen ownership comparison exactly as the policy compiler
+ * emits it. Exposure verification re-uses this renderer (through a rolled-
+ * back probe policy it deparses with pg_get_expr) so the expression it
+ * requires of managed policies can never drift from the one the compiler
+ * writes (JDW-27).
+ */
+export function compileOwnershipComparison(column: string): string {
   return `${quoteIdentifier(column)} = ${OWNERSHIP_EXPRESSION}`
 }
 
@@ -1344,6 +1399,134 @@ export function compileDropOwnershipPolicy(
   })
 }
 
+// ---------------------------------------------------------------------------
+// Locked exposure guards (JDW-27). The preflight services read the in-memory
+// table registry or the live catalogue before the executor acquires its
+// connection and advisory lock, so a concurrent expose can commit in that
+// window and the preflight answer is stale. These guards are compiled as the
+// FIRST statement of the affected plans, so they re-read the durable
+// microjbase.exposure_registry and the catalogue relflags under the same
+// advisory lock as the mutation itself and raise a class-9C SQLSTATE the
+// executor maps to a conflict, rolling the whole transaction back. All
+// catalogue references are pg_catalog-qualified and every embedded value is a
+// strictly validated literal, exactly like the locked source-type assertion.
+// ---------------------------------------------------------------------------
+
+// The single-statement guard body shared by compileAssertNotExposed and the
+// cascading-foreign-key refusal, so the compiled probe and every caller emit
+// byte-identical SQL.
+function exposedGuardStatement(schema: string, table: string): string {
+  const schemaLiteral = quoteLiteral(schema)
+  const tableLiteral = quoteLiteral(table)
+  return `DO $microjbase$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM microjbase.exposure_registry
+    WHERE schema_name = ${schemaLiteral}
+      AND table_name = ${tableLiteral}
+      AND exposed = TRUE
+  ) THEN
+    RAISE EXCEPTION 'table is exposed to the data API and cannot be modified'
+      USING ERRCODE = '${EXPOSED_MUTATION_GUARD_SQLSTATE}';
+  END IF;
+END
+$microjbase$`
+}
+
+/**
+ * Compile the locked exposure guard for a structural mutation or an RLS
+ * disablement: raise EXPOSED_MUTATION_GUARD_SQLSTATE when the durable
+ * registry lists the target as exposed. The in-memory preflight stays in
+ * place as the friendly early error; this is the authoritative check.
+ */
+export function compileAssertNotExposed(spec: RowSecurityTargetSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  assertDdlIdentifier(spec.table)
+  return sealPlan({
+    statements: [exposedGuardStatement(spec.schema, spec.table)],
+    description: `assert ${spec.schema}.${spec.table} is not exposed`,
+  })
+}
+
+export interface ExposurePrerequisiteSpec {
+  readonly schema: string
+  readonly table: string
+  /** The restricted runtime role the exposure grants apply to. */
+  readonly role: string
+}
+
+/**
+ * Compile the locked prerequisite guard for an expose: refuse when the target
+ * is already exposed in the durable registry (so a second concurrent expose
+ * conflicts instead of renaming the public alias), when row security is not
+ * enabled and forced, or when no RLS policy applies to the runtime role. The
+ * guard runs before any GRANT or registry upsert inside the same advisory
+ * lock, so an expose can never commit against drifted RLS state.
+ */
+export function compileAssertExposurePrerequisites(
+  spec: ExposurePrerequisiteSpec,
+): DdlPlan {
+  assertManageableSchema(spec.schema)
+  assertDdlIdentifier(spec.table)
+  assertDdlIdentifier(spec.role)
+  const schemaLiteral = quoteLiteral(spec.schema)
+  const tableLiteral = quoteLiteral(spec.table)
+  const roleLiteral = quoteLiteral(spec.role)
+  const statement = `DO $microjbase$
+DECLARE
+  microjbase_security_forced boolean;
+  microjbase_policy_applies boolean;
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM microjbase.exposure_registry
+    WHERE schema_name = ${schemaLiteral}
+      AND table_name = ${tableLiteral}
+      AND exposed = TRUE
+  ) THEN
+    RAISE EXCEPTION 'table is already exposed to the data API'
+      USING ERRCODE = '${EXPOSURE_GUARD_SQLSTATE}';
+  END IF;
+  SELECT (c.relrowsecurity AND c.relforcerowsecurity)
+    INTO microjbase_security_forced
+  FROM pg_catalog.pg_class c
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = ${schemaLiteral}
+    AND c.relname = ${tableLiteral}
+    AND c.relkind = 'r';
+  IF microjbase_security_forced IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'row-level security is not enabled and forced on the table'
+      USING ERRCODE = '${EXPOSURE_GUARD_SQLSTATE}';
+  END IF;
+  SELECT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_policy pol
+    JOIN pg_catalog.pg_class c ON c.oid = pol.polrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = ${schemaLiteral}
+      AND c.relname = ${tableLiteral}
+      AND (
+        pol.polroles = ARRAY[0]::oid[]
+        OR EXISTS (
+          SELECT 1
+          FROM pg_catalog.unnest(pol.polroles) AS policy_role
+          WHERE pg_catalog.pg_has_role(${roleLiteral}, policy_role, 'MEMBER')
+        )
+      )
+  ) INTO microjbase_policy_applies;
+  IF microjbase_policy_applies IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'no row-level security policy applies to the runtime role'
+      USING ERRCODE = '${EXPOSURE_GUARD_SQLSTATE}';
+  END IF;
+END
+$microjbase$`
+  return sealPlan({
+    statements: [statement],
+    description: `assert ${spec.schema}.${spec.table} satisfies exposure prerequisites`,
+  })
+}
+
 export interface ExecuteOptions {
   readonly idempotencyKey: string
   readonly commandType: string
@@ -1390,6 +1573,11 @@ const DDL_ERROR_MAP: Record<
     message: "Referenced table does not exist",
     status: 404,
   },
+  "42704": {
+    code: "TABLE_NOT_FOUND",
+    message: "Referenced object does not exist",
+    status: 404,
+  },
   "3F000": {
     code: "TABLE_NOT_FOUND",
     message: "Referenced schema does not exist",
@@ -1398,6 +1586,11 @@ const DDL_ERROR_MAP: Record<
   "23505": {
     code: "CONFLICT",
     message: "Operation conflicts with existing data",
+    status: 409,
+  },
+  "42710": {
+    code: "CONFLICT",
+    message: "Object already exists",
     status: 409,
   },
   "42501": {
@@ -1426,6 +1619,24 @@ const DDL_ERROR_MAP: Record<
     code: "CONFLICT",
     message:
       "Runtime role retains privileges on the table; revoke them before unexposing",
+    status: 409,
+  },
+  // Raised by the locked exposure guard compiled into structural mutations
+  // and the RLS-disablement plan: the durable registry lists the target as
+  // exposed, so the command must not run (R6, JDW-28).
+  "9C003": {
+    code: "CONFLICT",
+    message:
+      "Table is exposed to the data API and row-level security cannot be disabled",
+    status: 409,
+  },
+  // Raised by the locked exposure-prerequisite guard compiled into every
+  // expose plan: the target is already exposed, row security is not enabled
+  // and forced, or no policy applies to the runtime role (JDW-27).
+  "9C004": {
+    code: "CONFLICT",
+    message:
+      "Table no longer satisfies the exposure prerequisites; retry with a fresh key",
     status: 409,
   },
 }

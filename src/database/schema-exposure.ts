@@ -33,6 +33,8 @@
 // No HTTP mapping exists yet; the V02-18 admin API will call these commands
 // with operator authentication and idempotency keys.
 
+import { randomBytes } from "node:crypto"
+
 import type pg from "pg"
 
 import type {
@@ -48,18 +50,27 @@ import {
   findExposureByTarget,
   type ExposureRegistryRow,
 } from "./exposure-registry.js"
+import { quoteIdentifier } from "./identifier.js"
 import type { Pool } from "./pool.js"
 import {
+  compileAssertExposurePrerequisites,
   compileGrantRuntimePrivileges,
   compileMarkExposed,
   compileMarkUnexposed,
+  compileOwnershipComparison,
   compileRevokeRuntimePrivileges,
   compileVerifyRuntimePrivilegesRevoked,
   type ExecuteOptions,
   type ExecuteOutcome,
+  type OwnershipPolicyTemplate,
+  ownershipPolicyName,
+  ownershipPolicyTemplateShape,
   type SchemaDdlExecutor,
 } from "./schema-ddl.js"
-import { createSchemaOperationLog } from "./schema-operation-log.js"
+import {
+  createSchemaOperationLog,
+  type SchemaOperationRecord,
+} from "./schema-operation-log.js"
 import { classifySchemaObject } from "./schema-snapshot.js"
 import { isSupportedType, normalizeType } from "./table-types.js"
 
@@ -150,10 +161,6 @@ interface RlsRow {
   relforcerowsecurity: boolean
 }
 
-interface PolicyRow {
-  applicable: boolean
-}
-
 const TABLE_EXISTS_SQL = `SELECT EXISTS (
   SELECT 1 FROM pg_catalog.pg_class c
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -165,8 +172,18 @@ const TABLE_RLS_SQL = `SELECT c.relrowsecurity, c.relforcerowsecurity
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'`
 
-const POLICY_APPLICABLE_SQL = `SELECT EXISTS (
-  SELECT 1
+// Every policy applicable to the runtime role, with its expressions rendered
+// back through pg_get_expr. Exposure verification no longer accepts "any
+// applicable policy": it requires the module-owned ownership policy for each
+// command the runtime role will exercise and rejects any other permissive
+// policy applicable to the role, because permissive policies OR together and
+// a broader USING (true) beside the ownership policy would let one tenant
+// read another tenant's rows (JDW-27).
+const APPLICABLE_POLICIES_SQL = `SELECT pol.polname AS policy_name,
+       pol.polcmd AS command,
+       pol.polpermissive AS permissive,
+       pg_catalog.pg_get_expr(pol.polqual, pol.polrelid) AS using_expression,
+       pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid) AS check_expression
   FROM pg_catalog.pg_policy pol
   JOIN pg_catalog.pg_class c ON c.oid = pol.polrelid
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -177,8 +194,118 @@ const POLICY_APPLICABLE_SQL = `SELECT EXISTS (
       SELECT 1 FROM pg_catalog.unnest(pol.polroles) AS policy_role
       WHERE pg_catalog.pg_has_role($3, policy_role, 'MEMBER')
     )
-  )
-) AS applicable`
+  )`
+
+interface ApplicablePolicyRow {
+  policy_name: string
+  command: string
+  permissive: boolean
+  using_expression: string | null
+  check_expression: string | null
+}
+
+// The four commands the data API exercises on an exposed table, mapped to the
+// ownership template and the pg_policy.polcmd code that serves each.
+const RUNTIME_EXERCISED_COMMANDS: Readonly<
+  { template: OwnershipPolicyTemplate; policyCommand: string }[]
+> = Object.freeze([
+  { template: "read", policyCommand: "r" },
+  { template: "insert", policyCommand: "a" },
+  { template: "update", policyCommand: "w" },
+  { template: "delete", policyCommand: "d" },
+])
+
+// The frozen ownership comparison, rendered back through PostgreSQL itself.
+// Exposure verification cannot hard-code pg_get_expr's text rendering: the
+// deparse of the comparison is version-dependent, and a string that only
+// matches one server's rendering would fail closed on every other. Instead
+// the service creates a throwaway probe policy carrying the module's frozen
+// comparison inside a rolled-back transaction and returns what pg_get_expr
+// renders for it on THIS server, so the requirement is exactly the
+// expression the module itself compiles (JDW-27).
+export interface RenderedOwnershipComparison {
+  readonly using: string | null
+  readonly withCheck: string | null
+}
+
+export interface OwnershipComparisonProbe {
+  render(
+    schema: string,
+    table: string,
+    column: string,
+    template: OwnershipPolicyTemplate,
+  ): Promise<RenderedOwnershipComparison>
+}
+
+const OWNERSHIP_TEMPLATES: readonly OwnershipPolicyTemplate[] = Object.freeze([
+  "read",
+  "insert",
+  "update",
+  "delete",
+])
+
+// The (column, template) identity a policy name claims, derived only from a
+// name that reproduces the deterministic module digest, so a lookalike name
+// can never validate.
+function modulePolicyIdentity(
+  policyName: string,
+  table: string,
+  columnNames: readonly string[],
+): {
+  readonly column: string
+  readonly template: OwnershipPolicyTemplate
+} | null {
+  for (const column of columnNames) {
+    for (const template of OWNERSHIP_TEMPLATES) {
+      if (policyName === ownershipPolicyName(table, column, template)) {
+        return { column, template }
+      }
+    }
+  }
+  return null
+}
+
+// Whether a policy row is the module-owned ownership policy the given
+// template expects: the deterministic module name over one of the table's
+// columns, the template's exact FOR command, and the frozen ownership
+// expression on exactly the clause(s) that template renders (USING for
+// read/update/delete, WITH CHECK for insert/update), as rendered by this
+// PostgreSQL server for a probe policy carrying the module's own comparison.
+async function matchesModuleOwnershipPolicy(
+  row: ApplicablePolicyRow,
+  table: string,
+  columnNames: readonly string[],
+  template: OwnershipPolicyTemplate,
+  schema: string,
+  probe: OwnershipComparisonProbe,
+  cache: Map<string, Promise<RenderedOwnershipComparison>>,
+): Promise<boolean> {
+  const identity = modulePolicyIdentity(row.policy_name, table, columnNames)
+  if (identity === null || identity.template !== template) {
+    return false
+  }
+  const shape = ownershipPolicyTemplateShape(template)
+  const cacheKey = `${identity.column}:${template}`
+  let rendered = cache.get(cacheKey)
+  if (rendered === undefined) {
+    rendered = probe.render(schema, table, identity.column, template)
+    cache.set(cacheKey, rendered)
+  }
+  const expected = await rendered
+  if (shape.using && row.using_expression !== expected.using) {
+    return false
+  }
+  if (!shape.using && row.using_expression !== null) {
+    return false
+  }
+  if (shape.withCheck && row.check_expression !== expected.withCheck) {
+    return false
+  }
+  if (!shape.withCheck && row.check_expression !== null) {
+    return false
+  }
+  return true
+}
 
 const PRIMARY_KEY_SQL = `SELECT a.attname AS column_name,
        pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type
@@ -212,12 +339,19 @@ const COLUMNS_SQL = `SELECT a.attname AS column_name,
  * grants took effect is the post-commit runtime registry rebuild, which
  * runs the verified v0.1 builder as the runtime role before the new
  * snapshot is served.
+ *
+ * The strict policy check requires an ownership-comparison probe: the
+ * caller supplies one that renders the module's frozen comparison through
+ * this server's own deparser, because pg_get_expr's rendering is
+ * server-version-dependent and cannot be matched against a hard-coded
+ * string.
  */
 export async function verifyExposureCandidate(
   query: Query,
   runtimeRole: string,
   schema: string,
   table: string,
+  probe: OwnershipComparisonProbe,
 ): Promise<ExposureVerification> {
   const qualified = `${schema}.${table}`
 
@@ -236,17 +370,6 @@ export async function verifyExposureCandidate(
   }
   if (!rlsRow.relforcerowsecurity) {
     throw validation(`Forced row-level security is not enabled on ${qualified}`)
-  }
-
-  const policyResult = await query<PolicyRow>(POLICY_APPLICABLE_SQL, [
-    schema,
-    table,
-    runtimeRole,
-  ])
-  if (policyResult.rows[0]?.applicable !== true) {
-    throw validation(
-      `No row-level security policies on ${qualified} apply to the runtime role`,
-    )
   }
 
   const pkResult = await query<{ column_name: string; data_type: string }>(
@@ -270,10 +393,12 @@ export async function verifyExposureCandidate(
     attgenerated: string
     attidentity: string
   }>(COLUMNS_SQL, [schema, table])
+  const columnNames: string[] = []
   const readableColumns: string[] = []
   const insertableColumns: string[] = []
   const updatableColumns: string[] = []
   for (const row of columnsResult.rows) {
+    columnNames.push(row.column_name)
     const generated = row.attgenerated !== ""
     const identity = row.attidentity !== ""
     // Insert/update grants are restricted to supported types exactly like
@@ -301,10 +426,133 @@ export async function verifyExposureCandidate(
     throw validation(`Table ${qualified} has no updatable columns`)
   }
 
+  // Strict policy check: for every command the runtime role will exercise,
+  // the applicable policies must be exactly the module-owned ownership policy
+  // (deterministic name plus the frozen ownership expression rendered by this
+  // server). Any other permissive policy applicable to the role would OR with
+  // the ownership policy and expose one tenant's rows to another, so it fails
+  // closed here.
+  const policiesResult = await query<ApplicablePolicyRow>(
+    APPLICABLE_POLICIES_SQL,
+    [schema, table, runtimeRole],
+  )
+  const applicablePolicies = policiesResult.rows
+  const comparisonCache = new Map<
+    string,
+    Promise<RenderedOwnershipComparison>
+  >()
+  for (const { template, policyCommand } of RUNTIME_EXERCISED_COMMANDS) {
+    const commandPolicies = applicablePolicies.filter(
+      (row) => row.command === policyCommand || row.command === "*",
+    )
+    const hasModulePolicy = (
+      await Promise.all(
+        commandPolicies.map((row) =>
+          matchesModuleOwnershipPolicy(
+            row,
+            table,
+            columnNames,
+            template,
+            schema,
+            probe,
+            comparisonCache,
+          ),
+        ),
+      )
+    ).some(Boolean)
+    if (!hasModulePolicy) {
+      throw validation(
+        `Table ${qualified} has no managed ${template} ownership policy applying to the runtime role`,
+      )
+    }
+    const broader = (
+      await Promise.all(
+        commandPolicies.map(
+          async (row) =>
+            row.permissive &&
+            !(await matchesModuleOwnershipPolicy(
+              row,
+              table,
+              columnNames,
+              template,
+              schema,
+              probe,
+              comparisonCache,
+            )),
+        ),
+      )
+    ).some(Boolean)
+    if (broader) {
+      throw validation(
+        `A row-level security policy on ${qualified} other than the managed ${template} ownership policy applies to the runtime role`,
+      )
+    }
+  }
+
   return Object.freeze({
     readableColumns: Object.freeze(readableColumns),
     insertableColumns: Object.freeze(insertableColumns),
     updatableColumns: Object.freeze(updatableColumns),
+  })
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return (
+    Array.isArray(value) && value.every((entry) => typeof entry === "string")
+  )
+}
+
+// Rebuild the verified column contract from the recorded command of an
+// existing expose operation, so a replayed key compiles the byte-identical
+// statement list for the checksum comparison without re-verifying against a
+// catalogue that may have drifted since the recorded success (JDW-27).
+function verificationFromRecord(
+  record: SchemaOperationRecord,
+  input: ExposeTableCommand,
+): ExposureVerification {
+  const command = record.command
+  if (
+    typeof command !== "object" ||
+    command === null ||
+    Array.isArray(command)
+  ) {
+    throw new AppError(
+      "INTERNAL_ERROR",
+      "Malformed schema operation record: command must be a JSON object",
+      500,
+    )
+  }
+  const recorded = command as Record<string, JsonValue>
+  if (
+    recorded["schema"] !== input.schema ||
+    recorded["table"] !== input.table ||
+    recorded["alias"] !== input.alias
+  ) {
+    throw new AppError(
+      "CONFLICT",
+      "Idempotency key was already used with a different operation",
+      409,
+      { idempotencyKey: record.idempotencyKey },
+    )
+  }
+  const readableColumns = recorded["readableColumns"]
+  const insertableColumns = recorded["insertableColumns"]
+  const updatableColumns = recorded["updatableColumns"]
+  if (
+    !isStringArray(readableColumns) ||
+    !isStringArray(insertableColumns) ||
+    !isStringArray(updatableColumns)
+  ) {
+    throw new AppError(
+      "INTERNAL_ERROR",
+      "Malformed schema operation record: exposure command is missing the recorded column contract",
+      500,
+    )
+  }
+  return Object.freeze({
+    readableColumns: Object.freeze([...readableColumns]),
+    insertableColumns: Object.freeze([...insertableColumns]),
+    updatableColumns: Object.freeze([...updatableColumns]),
   })
 }
 
@@ -369,6 +617,59 @@ export function createSchemaExposureService(
   const query: Query = (text, values) => deps.pool.query(text, values)
   const operationLog = createSchemaOperationLog({ query })
 
+  // Render the module's frozen ownership comparison through this server's
+  // own deparser: create a uniquely named probe policy carrying the compiled
+  // comparison inside a transaction that always rolls back, and read back
+  // what pg_get_expr renders for it. Because the probe is created with the
+  // same compiled SQL the module's real policies use, its rendering is
+  // exactly what a genuine managed policy produces on this server — version
+  // differences in the deparser cannot cause a false rejection (JDW-27).
+  const comparisonProbe: OwnershipComparisonProbe = {
+    async render(schema, table, column, template) {
+      const shape = ownershipPolicyTemplateShape(template)
+      const probeName = `mjb_probe_${randomBytes(8).toString("hex")}`
+      const comparison = compileOwnershipComparison(column)
+      const client = await deps.pool.connect()
+      try {
+        await client.query("BEGIN")
+        try {
+          let statement =
+            `CREATE POLICY ${quoteIdentifier(probeName)} ` +
+            `ON ${quoteIdentifier(schema)}.${quoteIdentifier(table)} ` +
+            `FOR ${shape.command} TO ${quoteIdentifier(deps.runtimeRole)}`
+          if (shape.using) {
+            statement += ` USING (${comparison})`
+          }
+          if (shape.withCheck) {
+            statement += ` WITH CHECK (${comparison})`
+          }
+          await client.query(statement)
+          const rendered = await client.query<{
+            using: string | null
+            check: string | null
+          }>(
+            `SELECT pg_catalog.pg_get_expr(pol.polqual, pol.polrelid) AS using,
+                    pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid) AS check
+               FROM pg_catalog.pg_policy pol
+               JOIN pg_catalog.pg_class c ON c.oid = pol.polrelid
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = $1 AND c.relname = $2 AND pol.polname = $3`,
+            [schema, table, probeName],
+          )
+          const row = rendered.rows[0]
+          if (row === undefined) {
+            throw new AppError("INTERNAL_ERROR", "Schema operation failed", 500)
+          }
+          return { using: row.using, withCheck: row.check }
+        } finally {
+          await client.query("ROLLBACK").catch(() => undefined)
+        }
+      } finally {
+        client.release()
+      }
+    },
+  }
+
   async function hasExistingRecord(idempotencyKey: string): Promise<boolean> {
     return (await operationLog.get(idempotencyKey)) !== null
   }
@@ -426,7 +727,19 @@ export function createSchemaExposureService(
           `Alias "${input.alias}" must match ${ALIAS_PATTERN.source}`,
         )
       }
-      if (!(await hasExistingRecord(input.idempotencyKey))) {
+      // A brand-new key (and every dry run, which simulates against the live
+      // catalogue) runs the full preflight and exposure verification. A key
+      // with an existing operation record is a replay: verification is
+      // skipped because the table may legitimately have drifted since the
+      // recorded success, and the recorded contract rebuilds the exact
+      // statement list so the D-027 checksum comparison still classifies the
+      // begin outcome instead of dying in preflight (JDW-27).
+      const existing =
+        input.dryRun === true
+          ? null
+          : await operationLog.get(input.idempotencyKey)
+      let verification: ExposureVerification
+      if (input.dryRun === true || existing === null) {
         const byTarget: ExposureRegistryRow | null = await findExposureByTarget(
           { query },
           input.schema,
@@ -451,18 +764,17 @@ export function createSchemaExposureService(
         }
         const catalogue = await readCatalogue()
         await requireOwnedTable(catalogue, input.schema, input.table)
+        verification = await verifyExposureCandidate(
+          query,
+          deps.runtimeRole,
+          input.schema,
+          input.table,
+          comparisonProbe,
+        )
+      } else {
+        verification = verificationFromRecord(existing, input)
       }
 
-      // Compilation (new and replayed keys alike) re-derives the grant
-      // column lists from the live catalogue so the recorded statement list
-      // and checksum can always be reconstructed for comparison; D-027
-      // replay-first semantics then classify the begin outcome.
-      const verification = await verifyExposureCandidate(
-        query,
-        deps.runtimeRole,
-        input.schema,
-        input.table,
-      )
       const grantPlan = compileGrantRuntimePrivileges({
         schema: input.schema,
         table: input.table,
@@ -482,12 +794,27 @@ export function createSchemaExposureService(
         schema: input.schema,
         table: input.table,
       })
+      // The locked prerequisite guard runs before any GRANT or registry
+      // upsert: under the advisory lock it refuses a table that is already
+      // exposed (so a racing second expose conflicts instead of renaming the
+      // public alias) or whose row security has drifted since verification.
+      const prerequisitePlan = compileAssertExposurePrerequisites({
+        schema: input.schema,
+        table: input.table,
+        role: deps.runtimeRole,
+      })
+      // The recorded command carries the verified column contract so a replay
+      // can reconstruct the identical statement list for the checksum
+      // comparison without re-reading the live catalogue.
       const command: JsonValue = {
         schema: input.schema,
         table: input.table,
         alias: input.alias,
+        readableColumns: [...verification.readableColumns],
+        insertableColumns: [...verification.insertableColumns],
+        updatableColumns: [...verification.updatableColumns],
       }
-      const outcome = await execute([grantPlan, markPlan], {
+      const outcome = await execute([prerequisitePlan, grantPlan, markPlan], {
         idempotencyKey: input.idempotencyKey,
         commandType: "schema.exposure.expose",
         command,

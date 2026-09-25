@@ -69,6 +69,7 @@ import type { Pool } from "./pool.js"
 import {
   assertDdlIdentifier,
   compileAddColumn,
+  compileAssertNotExposed,
   compileChangeColumnType,
   compileCreateTable,
   compileDropColumn,
@@ -81,6 +82,7 @@ import {
   compileSetNotNull,
   type DdlColumnDefault,
   type DdlColumnType,
+  type DdlPlan,
   type ExecuteOptions,
   type ExecuteOutcome,
   isDdlColumnType,
@@ -411,6 +413,15 @@ export function createSchemaMutationService(
     }
   }
 
+  // Structural mutations on an exposed table must fail closed even when the
+  // in-memory registry the preflight read went stale before the executor
+  // reached its advisory lock: lead the compiled plan with the locked
+  // durable-registry guard so the authoritative check runs in the same
+  // transaction as the mutation (JDW-27).
+  function guardExposed(schema: string, table: string, plan: DdlPlan) {
+    return [compileAssertNotExposed({ schema, table }), plan]
+  }
+
   function requireColumn(
     table: SchemaCatalogueTable,
     column: string,
@@ -574,7 +585,7 @@ export function createSchemaMutationService(
         table: input.table,
         newName: input.newName,
       }
-      return execute(plan, {
+      return execute(guardExposed(input.schema, input.table, plan), {
         idempotencyKey: input.idempotencyKey,
         commandType: "schema.table.rename",
         command,
@@ -616,7 +627,7 @@ export function createSchemaMutationService(
         table: input.table,
         confirmed: true,
       }
-      return execute(plan, {
+      return execute(guardExposed(input.schema, input.table, plan), {
         idempotencyKey: input.idempotencyKey,
         commandType: "schema.table.drop",
         command,
@@ -658,7 +669,7 @@ export function createSchemaMutationService(
         table: input.table,
         column: describeColumn(input.column),
       }
-      return execute(plan, {
+      return execute(guardExposed(input.schema, input.table, plan), {
         idempotencyKey: input.idempotencyKey,
         commandType: "schema.column.add",
         command,
@@ -697,7 +708,7 @@ export function createSchemaMutationService(
         column: input.column,
         newName: input.newName,
       }
-      return execute(plan, {
+      return execute(guardExposed(input.schema, input.table, plan), {
         idempotencyKey: input.idempotencyKey,
         commandType: "schema.column.rename",
         command,
@@ -742,7 +753,7 @@ export function createSchemaMutationService(
         column: input.column,
         confirmed: true,
       }
-      return execute(plan, {
+      return execute(guardExposed(input.schema, input.table, plan), {
         idempotencyKey: input.idempotencyKey,
         commandType: "schema.column.drop",
         command,
@@ -793,7 +804,7 @@ export function createSchemaMutationService(
         default: input.default,
         type,
       }
-      return execute(plan, {
+      return execute(guardExposed(input.schema, input.table, plan), {
         idempotencyKey: input.idempotencyKey,
         commandType: "schema.column.default.set",
         command,
@@ -824,7 +835,7 @@ export function createSchemaMutationService(
         table: input.table,
         column: input.column,
       }
-      return execute(plan, {
+      return execute(guardExposed(input.schema, input.table, plan), {
         idempotencyKey: input.idempotencyKey,
         commandType: "schema.column.default.drop",
         command,
@@ -859,7 +870,7 @@ export function createSchemaMutationService(
         table: input.table,
         column: input.column,
       }
-      return execute(plan, {
+      return execute(guardExposed(input.schema, input.table, plan), {
         idempotencyKey: input.idempotencyKey,
         commandType: "schema.column.not_null.set",
         command,
@@ -889,7 +900,7 @@ export function createSchemaMutationService(
         table: input.table,
         column: input.column,
       }
-      return execute(plan, {
+      return execute(guardExposed(input.schema, input.table, plan), {
         idempotencyKey: input.idempotencyKey,
         commandType: "schema.column.not_null.drop",
         command,
@@ -954,7 +965,7 @@ export function createSchemaMutationService(
         fromType,
         toType: input.toType,
       }
-      return execute(plan, {
+      return execute(guardExposed(input.schema, input.table, plan), {
         idempotencyKey: input.idempotencyKey,
         commandType: "schema.column.type.change",
         command,

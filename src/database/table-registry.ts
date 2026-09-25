@@ -362,7 +362,7 @@ async function verifyTable(
   const { schema, table } = mapping
 
   const schemaUsageResult = await query<{ has: boolean }>(
-    "SELECT has_schema_privilege(current_user, $1, 'USAGE') AS has",
+    "SELECT pg_catalog.has_schema_privilege(current_user, $1, 'USAGE') AS has",
     [schema],
   )
   const schemaUsageRow = schemaUsageResult.rows[0]
@@ -378,8 +378,8 @@ async function verifyTable(
   const existsResult = await query<{ exists: boolean }>(
     `SELECT EXISTS (
        SELECT 1
-       FROM pg_class c
-       JOIN pg_namespace n ON n.oid = c.relnamespace
+       FROM pg_catalog.pg_class c
+       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
        WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'
      ) AS exists`,
     [schema, table],
@@ -399,8 +399,8 @@ async function verifyTable(
     relforcerowsecurity: boolean
   }>(
     `SELECT c.relrowsecurity, c.relforcerowsecurity
-     FROM pg_class c
-     JOIN pg_namespace n ON n.oid = c.relnamespace
+     FROM pg_catalog.pg_class c
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'`,
     [schema, table],
   )
@@ -415,7 +415,7 @@ async function verifyTable(
   }
 
   const deleteResult = await query<{ has: boolean }>(
-    "SELECT has_table_privilege(current_user, $1, 'DELETE') AS has",
+    "SELECT pg_catalog.has_table_privilege(current_user, $1, 'DELETE') AS has",
     [`${schema}.${table}`],
   )
   const deleteRow = deleteResult.rows[0]
@@ -433,15 +433,15 @@ async function verifyTable(
   }>(
     `SELECT EXISTS (
        SELECT 1
-       FROM pg_policy pol
-       JOIN pg_class c ON c.oid = pol.polrelid
-       JOIN pg_namespace n ON n.oid = c.relnamespace
+       FROM pg_catalog.pg_policy pol
+       JOIN pg_catalog.pg_class c ON c.oid = pol.polrelid
+       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
        WHERE n.nspname = $1 AND c.relname = $2
        AND (
          pol.polroles = ARRAY[0]::oid[]
          OR EXISTS (
-           SELECT 1 FROM unnest(pol.polroles) AS policy_role
-           WHERE pg_has_role(current_user, policy_role, 'MEMBER')
+           SELECT 1 FROM pg_catalog.unnest(pol.polroles) AS policy_role
+           WHERE pg_catalog.pg_has_role(current_user, policy_role, 'MEMBER')
          )
        )
      ) AS applicable_to_current_user`,
@@ -454,11 +454,11 @@ async function verifyTable(
     column_name: string
     data_type: string
   }>(
-    `SELECT a.attname AS column_name, format_type(a.atttypid, a.atttypmod) AS data_type
-     FROM pg_index i
-     JOIN pg_class c ON c.oid = i.indrelid
-     JOIN pg_namespace n ON n.oid = c.relnamespace
-     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+    `SELECT a.attname AS column_name, pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type
+     FROM pg_catalog.pg_index i
+     JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
      WHERE n.nspname = $1 AND c.relname = $2 AND i.indisprimary`,
     [schema, table],
   )
@@ -494,12 +494,12 @@ async function verifyTable(
     has_update: boolean
   }>(
     `SELECT a.attname AS column_name,
-            has_column_privilege(current_user, c.oid, a.attnum, 'SELECT') AS has_select,
-            has_column_privilege(current_user, c.oid, a.attnum, 'INSERT') AS has_insert,
-            has_column_privilege(current_user, c.oid, a.attnum, 'UPDATE') AS has_update
-     FROM pg_attribute a
-     JOIN pg_class c ON c.oid = a.attrelid
-     JOIN pg_namespace n ON n.oid = c.relnamespace
+            pg_catalog.has_column_privilege(current_user, c.oid, a.attnum, 'SELECT') AS has_select,
+            pg_catalog.has_column_privilege(current_user, c.oid, a.attnum, 'INSERT') AS has_insert,
+            pg_catalog.has_column_privilege(current_user, c.oid, a.attnum, 'UPDATE') AS has_update
+     FROM pg_catalog.pg_attribute a
+     JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname = $1 AND c.relname = $2
        AND a.attnum > 0 AND NOT a.attisdropped
      ORDER BY a.attnum`,
