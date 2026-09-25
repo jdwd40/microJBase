@@ -10,7 +10,8 @@
 //  - shell hygiene: no inline scripts, no browser storage APIs anywhere in
 //    the shipped client (the operator token is memory-only);
 //  - contract drift guard: the only /v1/admin paths the client references are
-//    the frozen V02-17 read endpoints — nothing invented, nothing extra;
+//    the frozen V02-17 read endpoints and the frozen V02-18 mutation
+//    endpoints — nothing invented, nothing extra;
 //  - robustness: unknown assets and traversal attempts 404; static assets do
 //    not consume the admin API rate budget; query strings do not weaken
 //    no-store; the admin API itself stays behind operator auth.
@@ -36,12 +37,19 @@ const ASSETS = [
   "token-store.js",
 ] as const
 
-// The exact V02-17 read surface the client may speak to (docs/admin-api.md).
-// "/v1/admin/schema" is a prefix of the others and must stay last.
+// The exact V02-17 read surface and V02-18 mutation surface the client may
+// speak to (docs/admin-api.md). Every table-scoped mutation path (rename,
+// drop, columns, indexes, constraints, foreign keys) lives under
+// "/v1/admin/schema/tables/"; "/v1/admin/schema" is a prefix of the others
+// and must stay last.
 const FROZEN_ADMIN_PREFIXES = [
   "/v1/admin/schema/capabilities",
   "/v1/admin/schema/history",
   "/v1/admin/schema/tables/",
+  "/v1/admin/schema/exposure",
+  "/v1/admin/schema/unexpose",
+  "/v1/admin/schema/rls/",
+  "/v1/admin/schema/policies",
   "/v1/admin/schema",
 ] as const
 
@@ -197,7 +205,7 @@ describe("shell serving", () => {
 })
 
 describe("client contract hygiene", () => {
-  it("references only the frozen V02-17 read endpoints", async () => {
+  it("references only the frozen V02-17 read and V02-18 mutation endpoints", async () => {
     let clientSource = ""
     for (const name of ASSETS) {
       if (name.endsWith(".js")) {

@@ -36,10 +36,50 @@ rate-limited and do not consume the admin API budget.
 The token is held exclusively in page memory: never in the URL,
 `localStorage`, `sessionStorage`, or cookies, and never logged. Reloading
 or closing the page signs the operator out. The client speaks only the
-frozen V02-17 read endpoints (`docs/admin-api.md`) — the capability probe,
-the schema snapshot, the table detail, and the operation history. This
-release is read-only; mutation flows (V02-18, with dry-run and
-confirmation) are a later increment.
+frozen V02-17 read endpoints and the frozen V02-18 mutation endpoints
+(`docs/admin-api.md`) — the capability probe, the schema snapshot, the table
+detail, the operation history, and the typed mutation commands. Nothing else
+is called, and no path is constructed from anything other than the frozen
+templates plus URL-encoded operator-supplied identifiers.
+
+## Mutation workflows (I2)
+
+Typed UI workflows cover the supported table (create, rename, drop), column
+(add, rename, drop, default set/drop, not-null/nullable, safe type change),
+index (create, drop), constraint (unique add, foreign-key add, drop),
+exposure (expose, unexpose), and RLS/policy (enable, disable, ownership
+policy add/remove) commands. The renderer and the validator share one spec
+registry (`view-models.js`), so the fields a form shows are exactly the
+fields the frozen endpoint accepts; client-side validation only mirrors the
+frozen allowlists, and the server remains the authority.
+
+Every workflow is dry-run-first:
+
+- A **Dry run** POSTs the command with `"dry_run": true` and the form's
+  idempotency key; on success the preview banner states nothing changed, and
+  only then does **Apply change** arm. Editing any value after a preview
+  disables apply again until a fresh dry run succeeds.
+- One **Idempotency-Key** is generated per form open (shown read-only). Dry
+  runs never touch the server's idempotency record, so the same key
+  graduates from preview to real execution; a replayed key returns the
+  recorded outcome, which the result banner says explicitly.
+- Destructive commands (drop table, drop column, disable row security)
+  require typing the exact confirmation value (`schema.table` or
+  `schema.table.column`) before either button works.
+- On success the client invalidates its snapshot and table caches, refreshes
+  from the server (the dropped table lands back on the overview; a rename or
+  create lands on the new detail), and shows the recorded command type,
+  status, and statement count. On failure only the frozen envelope is
+  rendered — code, safe message, and field-level `details` — never SQL,
+  SQLSTATEs, or stack traces.
+- 401 signs the operator out; 429 is shown with its countdown and never
+  auto-submits a mutation.
+
+Action availability mirrors the executor: internal tables get no actions;
+exposed tables get unexpose plus index/constraint management only, with a
+note that structural, RLS, and policy changes need an unexpose first; the
+managed `id` column and never-manageable constraints (primary key, check,
+exclusion) get no buttons.
 
 ## Views and states
 
@@ -57,11 +97,16 @@ confirmation) are a later increment.
 
 - Unit/component: `tests/unit/http/admin-ui/` — view models, render output
   (including escaping of hostile catalogue data), envelope classification,
-  and the memory-only token store.
+  the memory-only token store, and the mutation form specs (frozen
+  allowlists, confirmation values, typed body building).
 - E2E contract: `tests/e2e/admin-ui.test.ts` — lane gating, headers and
   content types, no-storage hygiene, and a drift guard proving the client
-  references only the frozen V02-17 paths.
+  references only the frozen V02-17 read and V02-18 mutation paths.
 - Browser smoke: `tests/browser/management-ui.spec.ts` (Playwright
   Chromium) — sign-in, 401/429/error/empty states, seeded table detail,
-  history, keyboard navigation, and a 360px responsive pass. Run with
-  `E2E_ADMIN_DATABASE_URL=... npm run test:browser` after `npm run build`.
+  history, keyboard navigation, and a 360px responsive pass.
+- Browser mutations: `tests/browser/management-ui-mutations.spec.ts` —
+  create/edit with dry-run previews, the expose/unexpose lifecycle,
+  destructive confirmations, sanitized server errors, auth isolation from
+  ordinary session tokens, and an accessibility pass over the forms. Run
+  with `E2E_ADMIN_DATABASE_URL=... npm run test:browser` after `npm run build`.

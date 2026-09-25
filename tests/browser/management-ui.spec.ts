@@ -413,7 +413,12 @@ test.describe("responsive and accessible shell", () => {
     ).toBeVisible()
 
     // Keyboard: from the focused heading, Tab moves into the content and
-    // lands on the first table row button, whatever the seeded state is.
+    // lands on the first schema's "Create table" action, then the first
+    // table row button, whatever the seeded state is.
+    await page.keyboard.press("Tab")
+    await expect(
+      page.getByRole("button", { name: "Create table" }).first(),
+    ).toBeFocused()
     await page.keyboard.press("Tab")
     await expect(page.locator("#main .row-button").first()).toBeFocused()
 
