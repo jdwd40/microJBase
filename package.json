@@ -16,6 +16,7 @@
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
     "test:e2e": "vitest run --project e2e",
+    "test:browser": "playwright test",
     "test": "vitest run",
     "migrate": "tsx scripts/migrate.ts",
     "start": "node dist/main.js",
@@ -28,6 +29,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.11.10",
     "eslint": "^10.11.0",

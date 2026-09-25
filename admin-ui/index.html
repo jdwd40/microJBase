@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>microJBase Admin</title>
+    <link rel="stylesheet" href="/admin/assets/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <div class="site-header-inner">
+        <span class="site-title">microJBase Admin</span>
+        <div class="site-header-actions" id="header-actions" hidden>
+          <span class="connection-badge" id="connection-badge">Connected</span>
+          <button type="button" id="sign-out" class="button button-secondary">
+            Sign out
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <div class="layout" id="layout" hidden>
+      <nav class="side-nav" aria-label="Administration">
+        <ul>
+          <li>
+            <a href="#schemas" data-nav="schemas" aria-current="page"
+              >Schemas</a
+            >
+          </li>
+          <li>
+            <a href="#history" data-nav="history">History</a>
+          </li>
+        </ul>
+      </nav>
+
+      <main id="main" class="main" tabindex="-1">
+        <h1 id="view-heading" tabindex="-1" class="view-heading">Schemas</h1>
+        <div id="view-status" class="visually-hidden" role="status"></div>
+        <div id="view-content"></div>
+      </main>
+    </div>
+
+    <main id="login-main" class="login-main">
+      <section class="login-panel" aria-labelledby="login-heading">
+        <h1 id="login-heading">Operator sign-in</h1>
+        <p class="login-hint">
+          Enter the operator token for this server. The token is held in memory
+          only and is never stored in the browser; reloading or closing this
+          page signs you out.
+        </p>
+        <div id="login-content"></div>
+      </section>
+    </main>
+
+    <script type="module" src="/admin/assets/app.js"></script>
+  </body>
+</html>
