@@ -7,7 +7,17 @@ import { AppError } from "../../../src/core/index.js"
 import {
   MIGRATION_LOCK_KEY_FOR_DISTINCTION,
   SCHEMA_DDL_LOCK_KEY,
+  compileAddColumn,
+  compileChangeColumnType,
   compileCreateTable,
+  compileDropColumn,
+  compileDropColumnDefault,
+  compileDropNotNull,
+  compileDropTable,
+  compileRenameColumn,
+  compileRenameTable,
+  compileSetColumnDefault,
+  compileSetNotNull,
   computeOperationChecksum,
   createSchemaDdlExecutor,
   createSchemaOperationLog,
@@ -15,6 +25,7 @@ import {
   translateDdlError,
 } from "../../../src/database/index.js"
 import type {
+  DdlColumnType,
   SchemaOperationLog,
   SchemaOperationRecord,
 } from "../../../src/database/index.js"
@@ -1097,5 +1108,275 @@ describe("createSchemaDdlExecutor", () => {
     ).rejects.toMatchObject({ code: "CONFLICT" })
     expect(calls.at(-2)).toBe("ROLLBACK")
     expect(calls).not.toContain("COMMIT")
+  })
+})
+
+describe("V02-07..V02-09 table and column builders", () => {
+  it("compileRenameTable renders a quoted RENAME TO", () => {
+    const plan = compileRenameTable({
+      schema: "app",
+      table: "notes",
+      newName: "documents",
+    })
+    expect(plan.statements).toEqual([
+      'ALTER TABLE "app"."notes" RENAME TO "documents"',
+    ])
+    expect(plan.description).toBe("rename table app.notes to documents")
+  })
+
+  it("compileRenameTable refuses internal schemas and hostile names", () => {
+    expect(() =>
+      compileRenameTable({
+        schema: "microjbase",
+        table: "notes",
+        newName: "documents",
+      }),
+    ).toThrow("Internal schemas cannot be modified")
+    expect(() =>
+      compileRenameTable({
+        schema: "PG_catalog",
+        table: "notes",
+        newName: "documents",
+      }),
+    ).toThrow("Internal schemas cannot be modified")
+    expect(() =>
+      compileRenameTable({
+        schema: "app",
+        table: 'notes"; DROP TABLE users; --',
+        newName: "documents",
+      }),
+    ).toThrow("Invalid SQL identifier")
+    expect(() =>
+      compileRenameTable({
+        schema: "app",
+        table: "notes",
+        newName: "bad name",
+      }),
+    ).toThrow("Invalid SQL identifier")
+  })
+
+  it("compileDropTable renders a quoted DROP TABLE without CASCADE", () => {
+    const plan = compileDropTable({ schema: "app", table: "notes" })
+    expect(plan.statements).toEqual(['DROP TABLE "app"."notes"'])
+    expect(plan.statements[0]).not.toContain("CASCADE")
+    expect(() =>
+      compileDropTable({ schema: "pg_temp", table: "notes" }),
+    ).toThrow("Internal schemas cannot be modified")
+  })
+
+  it("compileAddColumn renders type, nullability, and template defaults", () => {
+    const plan = compileAddColumn({
+      schema: "app",
+      table: "notes",
+      column: {
+        name: "priority",
+        type: "integer",
+        nullable: false,
+        default: { kind: "literal", value: 0 },
+      },
+    })
+    expect(plan.statements).toEqual([
+      'ALTER TABLE "app"."notes" ADD COLUMN "priority" integer NOT NULL DEFAULT 0',
+    ])
+  })
+
+  it("compileAddColumn renders nullable columns without NOT NULL", () => {
+    const plan = compileAddColumn({
+      schema: "app",
+      table: "notes",
+      column: {
+        name: "archived_at",
+        type: "timestamptz",
+        nullable: true,
+        default: { kind: "current_timestamp" },
+      },
+    })
+    expect(plan.statements[0]).toBe(
+      'ALTER TABLE "app"."notes" ADD COLUMN "archived_at" timestamptz DEFAULT CURRENT_TIMESTAMP',
+    )
+  })
+
+  it("compileAddColumn enforces the type allowlist and template guards", () => {
+    expect(() =>
+      compileAddColumn({
+        schema: "app",
+        table: "notes",
+        column: {
+          name: "payload",
+          type: "interval" as never,
+          nullable: true,
+          default: { kind: "none" },
+        },
+      }),
+    ).toThrow('column type "interval" is not allowlisted')
+    expect(() =>
+      compileAddColumn({
+        schema: "app",
+        table: "notes",
+        column: {
+          name: "title",
+          type: "text",
+          nullable: true,
+          default: { kind: "random_uuid" },
+        },
+      }),
+    ).toThrow("random_uuid defaults are only allowed for uuid columns")
+  })
+
+  it("compileAddColumn supports the managed primary key flag", () => {
+    const plan = compileAddColumn({
+      schema: "app",
+      table: "notes",
+      column: {
+        name: "id",
+        type: "uuid",
+        nullable: false,
+        default: { kind: "random_uuid" },
+        primaryKey: true,
+      },
+    })
+    expect(plan.statements[0]).toContain(
+      '"id" uuid NOT NULL DEFAULT pg_catalog.gen_random_uuid() PRIMARY KEY',
+    )
+  })
+
+  it("compileRenameColumn and compileDropColumn render quoted column names", () => {
+    expect(
+      compileRenameColumn({
+        schema: "app",
+        table: "notes",
+        column: "title",
+        newName: "heading",
+      }).statements,
+    ).toEqual(['ALTER TABLE "app"."notes" RENAME COLUMN "title" TO "heading"'])
+    expect(
+      compileDropColumn({ schema: "app", table: "notes", column: "title" })
+        .statements,
+    ).toEqual(['ALTER TABLE "app"."notes" DROP COLUMN "title"'])
+    expect(() =>
+      compileDropColumn({
+        schema: "information_schema",
+        table: "notes",
+        column: "title",
+      }),
+    ).toThrow("Internal schemas cannot be modified")
+  })
+
+  it("compileSetColumnDefault renders SET DEFAULT from the typed templates", () => {
+    const plan = compileSetColumnDefault({
+      schema: "app",
+      table: "notes",
+      column: "created_at",
+      type: "timestamptz",
+      default: { kind: "current_timestamp" },
+    })
+    expect(plan.statements).toEqual([
+      'ALTER TABLE "app"."notes" ALTER COLUMN "created_at" SET DEFAULT CURRENT_TIMESTAMP',
+    ])
+  })
+
+  it("compileSetColumnDefault refuses a missing default and template mismatches", () => {
+    expect(() =>
+      compileSetColumnDefault({
+        schema: "app",
+        table: "notes",
+        column: "title",
+        type: "text",
+        default: { kind: "none" },
+      }),
+    ).toThrow("a default value is required to set a column default")
+    expect(() =>
+      compileSetColumnDefault({
+        schema: "app",
+        table: "notes",
+        column: "title",
+        type: "text",
+        default: { kind: "current_timestamp" },
+      }),
+    ).toThrow(
+      "current_timestamp defaults are only allowed for timestamp and timestamptz columns",
+    )
+    expect(() =>
+      compileSetColumnDefault({
+        schema: "app",
+        table: "notes",
+        column: "ref",
+        type: "uuid",
+        default: { kind: "literal", value: "not-a-uuid" },
+      }),
+    ).toThrow("uuid literal defaults must be UUID strings")
+  })
+
+  it("compileDropColumnDefault, compileSetNotNull, and compileDropNotNull render single commands", () => {
+    expect(
+      compileDropColumnDefault({
+        schema: "app",
+        table: "notes",
+        column: "title",
+      }).statements,
+    ).toEqual(['ALTER TABLE "app"."notes" ALTER COLUMN "title" DROP DEFAULT'])
+    expect(
+      compileSetNotNull({
+        schema: "app",
+        table: "notes",
+        column: "title",
+      }).statements,
+    ).toEqual(['ALTER TABLE "app"."notes" ALTER COLUMN "title" SET NOT NULL'])
+    expect(
+      compileDropNotNull({
+        schema: "app",
+        table: "notes",
+        column: "title",
+      }).statements,
+    ).toEqual(['ALTER TABLE "app"."notes" ALTER COLUMN "title" DROP NOT NULL'])
+  })
+
+  it("compileChangeColumnType compiles only matrix-approved conversions", () => {
+    expect(
+      compileChangeColumnType({
+        schema: "app",
+        table: "notes",
+        column: "priority",
+        fromType: "integer",
+        toType: "bigint",
+      }).statements,
+    ).toEqual(['ALTER TABLE "app"."notes" ALTER COLUMN "priority" TYPE bigint'])
+    expect(
+      compileChangeColumnType({
+        schema: "app",
+        table: "notes",
+        column: "due_on",
+        fromType: "date",
+        toType: "timestamp",
+      }).statements,
+    ).toEqual([
+      'ALTER TABLE "app"."notes" ALTER COLUMN "due_on" TYPE timestamp',
+    ])
+  })
+
+  it("compileChangeColumnType refuses pairs outside the frozen matrix", () => {
+    const pairs: readonly (readonly [DdlColumnType, DdlColumnType])[] = [
+      ["text", "uuid"],
+      ["uuid", "text"],
+      ["timestamp", "timestamptz"],
+      ["timestamptz", "timestamp"],
+      ["boolean", "text"],
+      ["jsonb", "text"],
+      ["numeric", "integer"],
+      ["integer", "integer"],
+    ]
+    for (const [fromType, toType] of pairs) {
+      expect(() =>
+        compileChangeColumnType({
+          schema: "app",
+          table: "notes",
+          column: "value",
+          fromType,
+          toType,
+        }),
+      ).toThrow(
+        `type conversion from ${fromType} to ${toType} is not in the safe conversion matrix`,
+      )
+    }
   })
 })

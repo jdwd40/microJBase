@@ -1,7 +1,8 @@
 // Typed DDL planner/compiler and transactional executor for microJBase v0.2
-// (V02-06).
+// (V02-06), plus the V02-07..V02-09 table/column mutation builders that
+// compile on this core.
 //
-// This is the single audited DDL layer every later schema mutation command
+// This is the single audited DDL layer every schema mutation command
 // compiles through (D-014). Invariants:
 //
 // - Identifiers pass conservative validation and are quoted by one helper;
@@ -38,7 +39,11 @@
 //   internals; logs carry only event names, command types, and counts.
 //
 // Later waves add builders (alter/drop, indexes, constraints, policies) on
-// top of this compiler core; no mutation command ships until its wave.
+// top of this compiler core; no mutation command ships until its wave. The
+// V02-07..V02-09 builders below (table rename/drop, column add/rename/drop,
+// defaults, nullability, matrix-only type changes) are used by the typed
+// mutation commands in schema-mutations.ts and never construct SQL outside
+// the compiled plan shape.
 
 import type { JsonValue, JsonPrimitive } from "../contracts/index.js"
 import { AppError, type ErrorCode } from "../core/index.js"
@@ -131,6 +136,17 @@ function invalidIdentifier(): AppError {
   return new AppError("VALIDATION_ERROR", "Invalid SQL identifier", 400)
 }
 
+/**
+ * Validate a single identifier without quoting it. Callers that build their
+ * own SQL (e.g. preflight reads in schema-mutations.ts) use this to reject
+ * hostile names with the same stable error the compiler raises.
+ */
+export function assertDdlIdentifier(name: string): void {
+  if (!SIMPLE_IDENTIFIER.test(name)) {
+    throw invalidIdentifier()
+  }
+}
+
 function invalidInput(message: string): AppError {
   return new AppError("VALIDATION_ERROR", message, 400)
 }
@@ -185,6 +201,12 @@ export interface DdlColumnSpec {
   readonly type: DdlColumnType
   readonly nullable: boolean
   readonly default: DdlColumnDefault
+  /**
+   * Emit this column as a PRIMARY KEY column constraint. Only the managed
+   * table-lifecycle command uses this (V02-07); the generic V02-06 builder
+   * callers leave it unset.
+   */
+  readonly primaryKey?: boolean
 }
 
 export interface CreateTableSpec {
@@ -403,8 +425,9 @@ export function compileCreateTable(spec: CreateTableSpec): DdlPlan {
     const renderedType = TYPE_ALLOWLIST[column.type]
     const nullability = column.nullable ? "" : " NOT NULL"
     const defaultClause = renderDefaultClause(column.type, column.default)
+    const primaryKey = column.primaryKey === true ? " PRIMARY KEY" : ""
     renderedColumns.push(
-      `${quoteIdentifier(column.name)} ${renderedType}${nullability}${defaultClause}`,
+      `${quoteIdentifier(column.name)} ${renderedType}${nullability}${defaultClause}${primaryKey}`,
     )
   }
 
@@ -417,6 +440,220 @@ export function compileCreateTable(spec: CreateTableSpec): DdlPlan {
 
 export function describePlan(plan: DdlPlan): readonly string[] {
   return plan.statements
+}
+
+// ---------------------------------------------------------------------------
+// V02-07..V02-09 typed builders. Every statement below carries exactly one
+// command and reaches PostgreSQL only through the extended query protocol in
+// the executor, so no string can chain a second statement. Identifiers pass
+// the same conservative validation and quoting helper as the V02-06 core.
+// ---------------------------------------------------------------------------
+
+export interface RenameTableSpec {
+  readonly schema: string
+  readonly table: string
+  readonly newName: string
+}
+
+export interface DropTableSpec {
+  readonly schema: string
+  readonly table: string
+}
+
+export interface AddColumnSpec {
+  readonly schema: string
+  readonly table: string
+  readonly column: DdlColumnSpec
+}
+
+export interface RenameColumnSpec {
+  readonly schema: string
+  readonly table: string
+  readonly column: string
+  readonly newName: string
+}
+
+export interface DropColumnSpec {
+  readonly schema: string
+  readonly table: string
+  readonly column: string
+}
+
+export interface ColumnDefaultSpec {
+  readonly schema: string
+  readonly table: string
+  readonly column: string
+  readonly type: DdlColumnType
+  readonly default: DdlColumnDefault
+}
+
+export interface ColumnTargetSpec {
+  readonly schema: string
+  readonly table: string
+  readonly column: string
+}
+
+/**
+ * The frozen safe type-conversion matrix (V02-09). A conversion compiles only
+ * when the pair appears here; there is deliberately no arbitrary `USING`
+ * path. Every entry is a widening PostgreSQL can apply without a USING
+ * clause and without data loss for any value of the source type:
+ *
+ * - integer -> bigint, integer -> numeric, bigint -> numeric (widening)
+ * - date -> timestamp (midnight extension, no timezone involved)
+ *
+ * Everything else — including anything touching timestamp with time zone,
+ * uuid, jsonb, boolean, or text — is refused at the compiler, before SQL
+ * exists.
+ */
+export const SAFE_TYPE_CONVERSIONS: Readonly<
+  Record<DdlColumnType, readonly DdlColumnType[]>
+> = Object.freeze({
+  text: [],
+  integer: Object.freeze(["bigint", "numeric"] as const),
+  bigint: Object.freeze(["numeric"] as const),
+  boolean: [],
+  uuid: [],
+  timestamp: [],
+  timestamptz: [],
+  date: Object.freeze(["timestamp"] as const),
+  numeric: [],
+  jsonb: [],
+})
+
+export interface ChangeColumnTypeSpec {
+  readonly schema: string
+  readonly table: string
+  readonly column: string
+  readonly fromType: DdlColumnType
+  readonly toType: DdlColumnType
+}
+
+export function compileRenameTable(spec: RenameTableSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  const statement = `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} RENAME TO ${quoteIdentifier(spec.newName)}`
+  return sealPlan({
+    statements: [statement],
+    description: `rename table ${spec.schema}.${spec.table} to ${spec.newName}`,
+  })
+}
+
+export function compileDropTable(spec: DropTableSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  const statement = `DROP TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)}`
+  return sealPlan({
+    statements: [statement],
+    description: `drop table ${spec.schema}.${spec.table}`,
+  })
+}
+
+export function compileAddColumn(spec: AddColumnSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  if (!Object.hasOwn(TYPE_ALLOWLIST, spec.column.type)) {
+    throw invalidInput(`column type "${spec.column.type}" is not allowlisted`)
+  }
+  const renderedType = TYPE_ALLOWLIST[spec.column.type]
+  const nullability = spec.column.nullable ? "" : " NOT NULL"
+  const defaultClause = renderDefaultClause(
+    spec.column.type,
+    spec.column.default,
+  )
+  const primaryKey = spec.column.primaryKey === true ? " PRIMARY KEY" : ""
+  const statement =
+    `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ` +
+    `ADD COLUMN ${quoteIdentifier(spec.column.name)} ${renderedType}${nullability}${defaultClause}${primaryKey}`
+  return sealPlan({
+    statements: [statement],
+    description: `add column ${spec.column.name} to ${spec.schema}.${spec.table}`,
+  })
+}
+
+export function compileRenameColumn(spec: RenameColumnSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  const statement =
+    `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ` +
+    `RENAME COLUMN ${quoteIdentifier(spec.column)} TO ${quoteIdentifier(spec.newName)}`
+  return sealPlan({
+    statements: [statement],
+    description: `rename column ${spec.column} on ${spec.schema}.${spec.table} to ${spec.newName}`,
+  })
+}
+
+export function compileDropColumn(spec: DropColumnSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  const statement =
+    `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ` +
+    `DROP COLUMN ${quoteIdentifier(spec.column)}`
+  return sealPlan({
+    statements: [statement],
+    description: `drop column ${spec.column} from ${spec.schema}.${spec.table}`,
+  })
+}
+
+export function compileSetColumnDefault(spec: ColumnDefaultSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  const defaultClause = renderDefaultClause(spec.type, spec.default)
+  if (defaultClause === "") {
+    throw invalidInput("a default value is required to set a column default")
+  }
+  const statement =
+    `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ` +
+    `ALTER COLUMN ${quoteIdentifier(spec.column)} SET${defaultClause}`
+  return sealPlan({
+    statements: [statement],
+    description: `set the default of column ${spec.column} on ${spec.schema}.${spec.table}`,
+  })
+}
+
+export function compileDropColumnDefault(spec: ColumnTargetSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  const statement =
+    `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ` +
+    `ALTER COLUMN ${quoteIdentifier(spec.column)} DROP DEFAULT`
+  return sealPlan({
+    statements: [statement],
+    description: `drop the default of column ${spec.column} on ${spec.schema}.${spec.table}`,
+  })
+}
+
+export function compileSetNotNull(spec: ColumnTargetSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  const statement =
+    `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ` +
+    `ALTER COLUMN ${quoteIdentifier(spec.column)} SET NOT NULL`
+  return sealPlan({
+    statements: [statement],
+    description: `set column ${spec.column} on ${spec.schema}.${spec.table} NOT NULL`,
+  })
+}
+
+export function compileDropNotNull(spec: ColumnTargetSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  const statement =
+    `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ` +
+    `ALTER COLUMN ${quoteIdentifier(spec.column)} DROP NOT NULL`
+  return sealPlan({
+    statements: [statement],
+    description: `drop the NOT NULL constraint of column ${spec.column} on ${spec.schema}.${spec.table}`,
+  })
+}
+
+export function compileChangeColumnType(spec: ChangeColumnTypeSpec): DdlPlan {
+  assertManageableSchema(spec.schema)
+  const allowedTargets = SAFE_TYPE_CONVERSIONS[spec.fromType] ?? []
+  if (!allowedTargets.includes(spec.toType)) {
+    throw invalidInput(
+      `type conversion from ${spec.fromType} to ${spec.toType} is not in the safe conversion matrix`,
+    )
+  }
+  const targetSqlType = TYPE_ALLOWLIST[spec.toType]
+  const statement =
+    `ALTER TABLE ${quoteIdentifier(spec.schema)}.${quoteIdentifier(spec.table)} ` +
+    `ALTER COLUMN ${quoteIdentifier(spec.column)} TYPE ${targetSqlType}`
+  return sealPlan({
+    statements: [statement],
+    description: `change the type of column ${spec.column} on ${spec.schema}.${spec.table} from ${spec.fromType} to ${spec.toType}`,
+  })
 }
 
 export interface ExecuteOptions {
