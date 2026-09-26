@@ -55,10 +55,10 @@ There is no PostgREST, JWT service, Redis, message broker, or frontend in v0.1.
 - [docs/deployment.md](docs/deployment.md) — reproducible systemd + nginx deployment.
 - [docs/operations.md](docs/operations.md) — backup, restore, and upgrade procedures.
 - [docs/benchmarks.md](docs/benchmarks.md) — measured startup, RSS, and load evidence (reproducible via `scripts/benchmark.ts`).
-- [docs/release-checklist.md](docs/release-checklist.md) and [docs/release-notes-v0.1.md](docs/release-notes-v0.1.md) — v0.1 release evidence.
-- [docs/v0.2-scope.md](docs/v0.2-scope.md) — v0.2 product statement, security boundaries, and non-goals (planned).
-- [docs/v0.2-architecture.md](docs/v0.2-architecture.md) — v0.2 target internal modules and trust boundaries (planned).
-- [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md) — the sequential V02-00..V02-19 queue (planned).
+- [docs/release-checklist-v0.2.md](docs/release-checklist-v0.2.md) and [docs/release-notes-v0.2.md](docs/release-notes-v0.2.md) — v0.2 release evidence and rollback procedure.
+- [docs/v0.2-scope.md](docs/v0.2-scope.md) — v0.2 product statement, security boundaries, and non-goals.
+- [docs/v0.2-architecture.md](docs/v0.2-architecture.md) — v0.2 modules and trust boundaries.
+- [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md) — the V02-00..V02-19 delivery record.
 - [Project wiki](docs/project/index.html) — framework-free static dashboard of verified repository state.
 
 ## Architecture
@@ -98,7 +98,6 @@ Only configured aliases such as `todos=public.todos` are exposed. Table and colu
 
 **v0.1.0 released.** The v0.1 milestone is complete: tag `v0.1.0` on `master` (base commit `9413cfa`), 34 test files / 352 tests green, latest base-commit CI green. See [docs/release-notes-v0.1.md](docs/release-notes-v0.1.md) for release evidence.
 
-**v0.2 active.** The V02-00 planning/wiki foundation and V02-01 (read-only schema catalogue contracts and table/column reader, PR #26 at `b10c8c8`) are merged. Wave 1 V02-02 (constraint and index introspection) and V02-03 (schema snapshot service with migration/exposure state) are implemented on `master` and in independent review. Wave 2 V02-04 (disabled-by-default schema-admin connection and capability boundary), V02-05 (durable checksummed schema-operation history with idempotency), and V02-06 (single typed DDL compiler/executor with dry-run, advisory serialization, and safe error mapping) are implemented on `master`; their R2 review findings are remediated at `4e06488` and the wave awaits independent re-verification. Wave 3 V02-07 (typed create/rename/drop table commands), V02-08 (add/rename/drop column commands with generated/identity/primary-key safeguards), and V02-09 (typed defaults, nullability preflight, and the frozen safe type-conversion matrix) are implemented on `master` and await independent review. The milestone adds deliberately small schema-management capabilities behind an opt-in admin boundary. See [docs/v0.2-scope.md](docs/v0.2-scope.md), [docs/v0.2-architecture.md](docs/v0.2-architecture.md), and [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md). Progress is tracked on the [project wiki](docs/project/index.html). Wave 6 V02-16 (operator-token authentication and isolated admin composition), V02-17 (read-only schema/history HTTP API), and V02-18 (idempotent typed mutation HTTP API) are implemented on `master` under the `/v1/admin/schema` tree (see [docs/admin-api.md](docs/admin-api.md)) and await independent review.
+**v0.2.0 release candidate.** V02-00..V02-18 are integrated on `master`: read-only catalogue/snapshots, audited and idempotent typed schema mutations, the durable exposure registry, predefined ownership-policy templates, the opt-in admin API, and the dependency-free management UI. The R4 integrated review findings are closed at `16a8e7d`. V02-19 release evidence and final verification are recorded in [docs/release-checklist-v0.2.md](docs/release-checklist-v0.2.md); no production deployment is part of this release preparation.
 
 The implementation sequence for v0.1 is in [ROADMAP.md](ROADMAP.md). AI coding agents must follow [AGENTS.md](AGENTS.md).
-

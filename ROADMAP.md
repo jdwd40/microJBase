@@ -105,7 +105,7 @@ Merged in PR #24.
 
 ## v0.2 — schema management (active)
 
-V02-00 is complete in PR #25 and V02-01 (read-only schema catalogue contracts and the table/column reader) is merged in PR #26 at `b10c8c8`. V02-02 (constraint and index introspection) and V02-03 (schema snapshot service with migration/exposure state) are implemented on `master` and in independent review; V02-04 (schema-admin connection and capability boundary), V02-05 (durable schema-operation history and idempotency), and V02-06 (typed DDL planner/compiler and executor) are implemented on `master` and await independent review; the remaining queue V02-07..V02-19 stays frozen. Progress is 2 of 20 queue items merged (10%). v0.2 adds deliberately small schema-management capabilities: read-only introspection, a typed audited DDL layer, a durable exposure registry, predefined RLS ownership templates, and an opt-in admin API. The frozen sequential queue (V02-00 through V02-19, one active implementation PR at a time) is defined in [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md); scope and architecture are in [docs/v0.2-scope.md](docs/v0.2-scope.md) and [docs/v0.2-architecture.md](docs/v0.2-architecture.md).
+V02-00..V02-18 are implemented and independently reviewed on `master`; the integrated R4 findings are closed at `16a8e7d`. V02-19 is the active release gate: reconcile documentation and package metadata, verify clean and v0.1-upgrade migrations, run the full test/audit/measurement matrix, and record rollback evidence. v0.2 adds deliberately small schema-management capabilities: read-only introspection, a typed audited DDL layer, a durable exposure registry, predefined RLS ownership templates, an opt-in admin API, and a dependency-free management UI. The delivery record is in [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md); release evidence is in [docs/release-checklist-v0.2.md](docs/release-checklist-v0.2.md).
 
 ## Later candidates — not commitments
 
@@ -120,4 +120,3 @@ Only consider these after real use demonstrates a need:
 - per-table pagination cursors.
 
 Storage, realtime, arbitrary functions, analytics, and a large dashboard remain outside the project's identity.
-
