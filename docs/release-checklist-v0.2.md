@@ -1,6 +1,6 @@
 # microJBase v0.2 release checklist
 
-Release candidate baseline: `16a8e7d` plus the V02-19 documentation/version increment. This checklist records preparation only; it does not authorize a tag or production deployment.
+Verified release baseline: `4ca05c4` (including the V02-19 documentation/version increment and two verification-harness fixes). This checklist records release preparation only; it does not authorize a tag or production deployment.
 
 ## Review disposition
 
@@ -15,13 +15,13 @@ Release candidate baseline: `16a8e7d` plus the V02-19 documentation/version incr
 - [x] `npm audit --omit=dev --audit-level=moderate` reports zero vulnerabilities.
 - [x] tracked high-signal secret scan reports no matches.
 - [x] clean database applies migrations 0001 through 0007 in order.
-- [ ] database-backed unit/integration/E2E suite passes from a clean test database.
-- [ ] compiled-server E2E suite passes.
-- [ ] Playwright management-UI suite passes.
-- [ ] v0.1-to-v0.2 migration is exercised from the v0.1 migration boundary.
-- [ ] startup, RSS, and connection measurements are recorded.
+- [x] database-backed unit/integration/E2E suite passes from clean isolated databases: 68 files / 935 tests (unit 36/580, integration 22/287, E2E 10/68).
+- [x] compiled-server E2E passes: 10 files / 68 tests spawn `node dist/main.js` behind the build-freshness guard.
+- [x] Playwright management-UI suite passes with package-pinned Chromium 1243: 14 tests.
+- [x] v0.1-to-v0.2 migration is exercised from the 0001..0004 boundary through 0005..0007; representative users, sessions, and todos remain byte-identical.
+- [x] measurements are recorded: 396 ms median startup, 84.26 MiB idle RSS, one idle runtime database connection, and 1,267 req/s with zero failures.
 
-Unchecked items are release blockers, not silently waived gates. Exact commands and results are recorded on JDW-16 when the run completes.
+Exact environment, commands, and results are recorded on JDW-36 and summarized here. The 84.26 MiB Node 24 idle measurement exceeds the original 80 MiB target, as did the earlier 81.6 MiB Node 22 measurement. This is accepted as a documented guardrail miss rather than a correctness blocker: startup, workload, and connection checks pass, and the testing strategy explicitly calls for profiling rather than library replacement when the target is missed.
 
 ## Rollback
 

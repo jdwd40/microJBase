@@ -103,9 +103,9 @@ Merged in PR #24.
 - [x] Run the full release checklist
 - [x] Tag `v0.1.0`
 
-## v0.2 — schema management (active)
+## v0.2 — schema management (release-ready)
 
-V02-00..V02-18 are implemented and independently reviewed on `master`; the integrated R4 findings are closed at `16a8e7d`. V02-19 is the active release gate: reconcile documentation and package metadata, verify clean and v0.1-upgrade migrations, run the full test/audit/measurement matrix, and record rollback evidence. v0.2 adds deliberately small schema-management capabilities: read-only introspection, a typed audited DDL layer, a durable exposure registry, predefined RLS ownership templates, an opt-in admin API, and a dependency-free management UI. The delivery record is in [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md); release evidence is in [docs/release-checklist-v0.2.md](docs/release-checklist-v0.2.md).
+V02-00..V02-19 are implemented, independently reviewed, integrated, and verified on `master`. The final isolated matrix passes 935 unit/integration/E2E tests and 14 browser tests, exercises clean and v0.1-boundary migrations, and records audits and resource measurements. v0.2 adds deliberately small schema-management capabilities: read-only introspection, a typed audited DDL layer, a durable exposure registry, predefined RLS ownership templates, an opt-in admin API, and a dependency-free management UI. The delivery record is in [docs/v0.2-implementation-plan.md](docs/v0.2-implementation-plan.md); exact release evidence and rollback guidance are in [docs/release-checklist-v0.2.md](docs/release-checklist-v0.2.md).
 
 ## Later candidates — not commitments
 

@@ -98,6 +98,6 @@ Only configured aliases such as `todos=public.todos` are exposed. Table and colu
 
 **v0.1.0 released.** The v0.1 milestone is complete: tag `v0.1.0` on `master` (base commit `9413cfa`), 34 test files / 352 tests green, latest base-commit CI green. See [docs/release-notes-v0.1.md](docs/release-notes-v0.1.md) for release evidence.
 
-**v0.2.0 release candidate.** V02-00..V02-18 are integrated on `master`: read-only catalogue/snapshots, audited and idempotent typed schema mutations, the durable exposure registry, predefined ownership-policy templates, the opt-in admin API, and the dependency-free management UI. The R4 integrated review findings are closed at `16a8e7d`. V02-19 release evidence and final verification are recorded in [docs/release-checklist-v0.2.md](docs/release-checklist-v0.2.md); no production deployment is part of this release preparation.
+**v0.2.0 release-ready.** V02-00..V02-19 are integrated and verified on `master`: read-only catalogue/snapshots, audited and idempotent typed schema mutations, the durable exposure registry, predefined ownership-policy templates, the opt-in admin API, and the dependency-free management UI. All independent review findings are dispositioned, and the complete verification record is in [docs/release-checklist-v0.2.md](docs/release-checklist-v0.2.md). No tag or production deployment is part of this release preparation.
 
 The implementation sequence for v0.1 is in [ROADMAP.md](ROADMAP.md). AI coding agents must follow [AGENTS.md](AGENTS.md).

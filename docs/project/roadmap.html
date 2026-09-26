@@ -29,17 +29,17 @@
         <h2>v0.2 queue state</h2>
         <p class="muted">
           Last updated:
-          <time datetime="2026-09-25T09:20:00Z">2026-09-25 09:20 UTC</time>.
+          <time datetime="2026-09-26T08:45:00Z">2026-09-26 08:45 UTC</time>.
         </p>
         <p>
           The v0.2 queue has 20 items (V02-00 through V02-19).
           <strong
-            >V02-00 and V02-01 are complete — 2 of 20 merged (10%); V02-02 and
-            V02-03 are implemented on master and in independent review; V02-04,
-            V02-05, and V02-06 are implemented on master and awaiting
-            independent review</strong
-          >. One active implementation PR at a time; each merges only after
-          independent review with no unresolved BLOCKER/MAJOR and green CI.
+            >All 20 are implemented, independently reviewed, integrated, and
+            release-verified on master.</strong
+          >
+          The final matrix passes 935 unit/integration/E2E tests and 14 browser
+          tests; exact evidence is in
+          <code>docs/release-checklist-v0.2.md</code>.
         </p>
         <p class="muted">
           Completion timestamps use the GitHub merge time and are shown in UTC.
@@ -99,7 +99,7 @@
               <td>V02-02</td>
               <td>Constraint and index introspection</td>
               <td>
-                <span class="badge progress">implemented</span> awaiting review
+                <span class="badge done">complete</span>
                 ·
                 <time datetime="2026-09-24T22:30:00Z"
                   >2026-09-24 22:30 UTC</time
@@ -110,7 +110,7 @@
               <td>V02-03</td>
               <td>Schema snapshot service and migration/exposure state</td>
               <td>
-                <span class="badge progress">implemented</span> awaiting review
+                <span class="badge done">complete</span>
                 ·
                 <time datetime="2026-09-24T22:30:00Z"
                   >2026-09-24 22:30 UTC</time
@@ -136,17 +136,17 @@
             <tr>
               <td>V02-04</td>
               <td>Schema-admin connection and capability boundary</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
             <tr>
               <td>V02-05</td>
               <td>Durable schema-operation history and idempotency</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
             <tr>
               <td>V02-06</td>
               <td>Typed DDL planner/compiler and executor</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
           </tbody>
         </table>
@@ -167,17 +167,17 @@
             <tr>
               <td>V02-07</td>
               <td>Create, rename, and drop tables</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
             <tr>
               <td>V02-08</td>
               <td>Add, rename, and drop columns</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
             <tr>
               <td>V02-09</td>
               <td>Defaults, nullability, and safe type changes</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
           </tbody>
         </table>
@@ -198,22 +198,22 @@
             <tr>
               <td>V02-10</td>
               <td>Durable API-exposure registry and compatibility migration</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
             <tr>
               <td>V02-11</td>
               <td>Index and unique-constraint management</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
             <tr>
               <td>V02-12</td>
               <td>Foreign-key and primary-key management</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
             <tr>
               <td>V02-13</td>
               <td>Expose/unexpose service and atomic registry refresh</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
           </tbody>
         </table>
@@ -234,12 +234,12 @@
             <tr>
               <td>V02-14</td>
               <td>RLS state management with fail-closed disable rules</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
             <tr>
               <td>V02-15</td>
               <td>Predefined user_id ownership policy templates</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
           </tbody>
         </table>
@@ -260,22 +260,22 @@
             <tr>
               <td>V02-16</td>
               <td>Operator authentication and isolated admin composition</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
             <tr>
               <td>V02-17</td>
               <td>Read-only admin schema and history HTTP API</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
             <tr>
               <td>V02-18</td>
               <td>Mutating admin schema HTTP API</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
             <tr>
               <td>V02-19</td>
               <td>v0.2 hardening, contract freeze, and release evidence</td>
-              <td><span class="badge queued">queued</span></td>
+              <td><span class="badge done">complete</span></td>
             </tr>
           </tbody>
         </table>

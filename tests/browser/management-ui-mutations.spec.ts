@@ -337,9 +337,7 @@ test("destructive flows require the exact confirmation", async ({ page }) => {
     has: page.getByRole("heading", { name: "Columns" }),
   })
   const bodyRow = columns.getByRole("row", { name: /^body / })
-  await bodyRow
-    .getByRole("button", { name: "Drop body", exact: true })
-    .click()
+  await bodyRow.getByRole("button", { name: "Drop body", exact: true }).click()
   await expect(page.locator("#mutation-heading")).toHaveText("Drop column body")
   await expect(page.getByText(/Exact value:/)).toContainText(
     `e2e_admin.${table}.body`,

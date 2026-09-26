@@ -91,6 +91,15 @@ startup median 394 ms (min 383, max 460), idle RSS 82 MiB, workload ~1020
 req/s with p50 7.6 ms / p95 20 ms / p99 31 ms and 0 failures — consistent
 with the Node 22 run.
 
+## v0.2 release verification (Node v24.21.0)
+
+The isolated V02-19 run on PostgreSQL 18.6 measured a 396 ms median startup,
+84.26 MiB idle RSS, 122.3 MiB after the workload, and exactly one idle runtime
+database connection. Its 1,000-request workload completed with zero failures at
+1,267 req/s and p95 latency of 15.9 ms. Idle RSS remains above the original
+80 MiB target, consistently with the Node 22 result above; this is recorded as
+a profiling input, not hidden or treated as evidence for replacing libraries.
+
 ## Raw data
 
 The JSON emitted by the script (including per-run samples) is the raw record

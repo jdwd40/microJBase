@@ -85,24 +85,25 @@
           >
           merged as PR #26 at
           <code>b10c8c8</code>
-          <time datetime="2026-09-21T20:55:01Z">2026-09-21 20:55 UTC</time>.
-          Progress is 2 of 20 v0.2 items merged (10%).
+          <time datetime="2026-09-21T20:55:01Z">2026-09-21 20:55 UTC</time>. The
+          full V02-00..V02-19 queue is now implemented, independently reviewed,
+          integrated, and release-verified on <code>master</code>.
         </p>
         <p>
-          <span class="badge progress">implemented</span>
+          <span class="badge done">complete</span>
           <strong>V02-02 — Constraint and index introspection</strong> and
           <strong
             >V02-03 — Schema snapshot service and migration/exposure
             state</strong
           >
-          are implemented on <code>master</code> at
+          were implemented on <code>master</code> at
           <time datetime="2026-09-25T09:20:00Z">2026-09-25 09:20 UTC</time> with
           the full suite green at 39 files / 420 tests. They preserve the
           single-query catalogue read and add no HTTP routes, no DDL, and no
-          database mutation. Independent review is the next gate.
+          database mutation. Their independent review is complete.
         </p>
         <p>
-          <span class="badge progress">implemented</span>
+          <span class="badge done">complete</span>
           <strong
             >V02-04 — Schema-admin connection and capability boundary</strong
           >,
@@ -123,7 +124,8 @@
           envelopes. Unit and integration suites are green at 37 files / 465
           tests against real PostgreSQL, including replay, conflict,
           concurrency, rollback, lane-isolation, and log-redaction coverage.
-          Independent review is the next gate.
+          Independent review and the final integrated release matrix are
+          complete.
         </p>
         <p>
           The v0.2 queue and wave structure are on the
@@ -160,43 +162,37 @@
             </tr>
             <tr>
               <td>Schema introspection (read-only)</td>
-              <td>
-                <span class="badge done">implemented</span> V02-01..V02-03;
-                V02-02–03 await independent review
-              </td>
+              <td><span class="badge done">complete</span> V02-01..V02-03</td>
             </tr>
             <tr>
               <td>Typed DDL layer and operation history</td>
-              <td>
-                <span class="badge done">implemented</span> V02-04..V02-06;
-                await independent review
-              </td>
+              <td><span class="badge done">complete</span> V02-04..V02-06</td>
             </tr>
             <tr>
               <td>Table/column lifecycle commands</td>
-              <td><span class="badge queued">queued</span> V02-07..V02-09</td>
+              <td><span class="badge done">complete</span> V02-07..V02-09</td>
             </tr>
             <tr>
               <td>Exposure registry, indexes, constraints</td>
-              <td><span class="badge queued">queued</span> V02-10..V02-13</td>
+              <td><span class="badge done">complete</span> V02-10..V02-13</td>
             </tr>
             <tr>
               <td>RLS ownership policy templates</td>
-              <td><span class="badge queued">queued</span> V02-14..V02-15</td>
+              <td><span class="badge done">complete</span> V02-14..V02-15</td>
             </tr>
             <tr>
               <td>Opt-in admin API under /v1/admin/schema</td>
-              <td><span class="badge queued">queued</span> V02-16..V02-18</td>
+              <td><span class="badge done">complete</span> V02-16..V02-18</td>
             </tr>
             <tr>
               <td>v0.2 hardening and release evidence</td>
-              <td><span class="badge queued">queued</span> V02-19</td>
+              <td><span class="badge done">complete</span> V02-19</td>
             </tr>
           </tbody>
         </table>
         <p class="muted">
-          Nothing under “queued” exists in the repository yet; the admin API,
-          schema mutation, and any GUI are strictly planned capabilities.
+          Exact verification evidence and the documented RSS guardrail
+          disposition are in <code>docs/release-checklist-v0.2.md</code>.
         </p>
 
         <h2>Links</h2>
