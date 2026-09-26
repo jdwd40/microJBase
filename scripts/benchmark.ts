@@ -104,6 +104,9 @@ async function provisionDatabase(): Promise<void> {
       GRANT SELECT, INSERT, UPDATE ON microjbase.sessions TO ${BENCH_RUNTIME_ROLE};
       GRANT USAGE ON SCHEMA public TO ${BENCH_RUNTIME_ROLE};
       GRANT SELECT, INSERT, UPDATE, DELETE ON public.todos TO ${BENCH_RUNTIME_ROLE};
+      GRANT SELECT ON microjbase.exposure_registry TO ${BENCH_RUNTIME_ROLE};
+      GRANT SELECT ON microjbase.exposure_registry_state TO ${BENCH_RUNTIME_ROLE};
+      GRANT EXECUTE ON FUNCTION microjbase.import_exposure_registry(JSONB) TO ${BENCH_RUNTIME_ROLE};
     `)
   } finally {
     await benchmark.end()
