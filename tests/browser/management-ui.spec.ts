@@ -286,7 +286,9 @@ test("seeded table renders columns, constraints, indexes, and RLS state", async 
   const indexes = page.locator("section.panel", {
     has: page.getByRole("heading", { name: "Indexes" }),
   })
-  await expect(indexes.getByText("notes_title_idx")).toBeVisible()
+  await expect(
+    indexes.getByRole("row", { name: /notes_title_idx/ }),
+  ).toBeVisible()
 
   // RLS is enabled and forced; the table is not exposed.
   await expect(page.getByText("Enabled, forced")).toBeVisible()
