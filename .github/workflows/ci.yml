@@ -77,3 +77,6 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Verify documented systemd deployment
+        run: bash scripts/verify-systemd.sh
