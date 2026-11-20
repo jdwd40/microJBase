@@ -1,8 +1,7 @@
 // Domain errors for the auth module.
 //
-// Core's AppError class is not on master yet (open PR #15). Auth must not
-// import from core; this local class implements the frozen contracts AppError
-// interface so HTTP can map code/status/message/details later.
+// Auth implements the shared error contract so HTTP can translate domain
+// failures without coupling authentication to the core error class.
 
 import type { AppError, ErrorCode } from "../contracts/index.js"
 

@@ -105,3 +105,16 @@ a profiling input, not hidden or treated as evidence for replacing libraries.
 The JSON emitted by the script (including per-run samples) is the raw record
 of the primary run; it is reproducible bit-for-bit in method (numbers will
 naturally vary run to run by a few percent on shared hardware).
+
+## Twenty-client CRUD verification (20 November 2026)
+
+The same benchmark command now also runs 20 concurrent HTTP clients. Each
+creates, reads, updates and deletes ten private rows under the benchmark
+identity. It checks status codes, read values and update results. A failed
+operation exits the benchmark with an error.
+
+On Node 22.13.0, PostgreSQL 17.11 and Linux x64 (AMD EPYC 9V74, 9 logical
+CPUs visible), all 800 requests succeeded in 521 ms, about 1,536 requests/s.
+Median startup was 263 ms over five launches. Idle API RSS was 80.21 MiB,
+0.21 MiB above the 80 MiB target. PostgreSQL memory is measured separately
+from the API and is excluded from this number.
