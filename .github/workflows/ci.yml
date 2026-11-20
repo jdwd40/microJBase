@@ -79,4 +79,6 @@ jobs:
         run: npm test
 
       - name: Verify documented systemd deployment
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: bash scripts/verify-systemd.sh

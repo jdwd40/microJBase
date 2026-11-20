@@ -46,9 +46,10 @@ CREATE ROLE microjbase_runtime WITH LOGIN PASSWORD '<strong-random-password>'
 ```bash
 sudo useradd --system --home /opt/microjbase --shell /usr/sbin/nologin microjbase
 sudo mkdir -p /opt/microjbase
-sudo chown microjbase:microjbase /opt/microjbase
+sudo chown "$(id -un):$(id -gn)" /opt/microjbase
+sudo chmod 0755 /opt/microjbase
 
-# As the deploy user, from the release checkout:
+# As the operator who owns the checkout (distinct from the service user):
 git clone https://github.com/jdwd40/microJBase.git /opt/microjbase/app
 cd /opt/microjbase/app
 git checkout <release-tag-or-commit>
@@ -64,8 +65,8 @@ the production database.
 
 ### 2.3 Configure the environment
 
-Create `/etc/microjbase/microjbase.env` (mode `0400`, readable only by the
-service user). systemd `EnvironmentFile` uses plain `KEY=value` lines — no
+Create `/etc/microjbase/microjbase.env` (root-owned, mode `0600`).
+The system service manager reads it before starting the service. systemd `EnvironmentFile` uses plain `KEY=value` lines — no
 shell expansion:
 
 ```ini
@@ -184,8 +185,8 @@ WantedBy=multi-user.target
 ```
 
 Adjust `ExecStart` to the absolute path of Node 22 (`command -v node`).
-`ProtectSystem=full` leaves `/opt` writable-owned-by-root read-only, which is
-fine: the application performs no runtime filesystem writes.
+Keep the deployment directory and its files writable only by the deploy
+operator. The service account needs read and execute access.
 
 Enable and start:
 
