@@ -3,8 +3,6 @@
 // compiled server's own stdout/stderr contains no password, raw token,
 // token hash, password hash, database URL, or database password.
 
-import { createHash } from "node:crypto"
-
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import { adminMaintenanceUrl, runtimeDatabaseUrl } from "./helpers/config.js"
@@ -13,7 +11,7 @@ import {
   ensureRuntimeRole,
   withClient,
 } from "./helpers/database.js"
-import { expectError, registerUser } from "./helpers/http.js"
+import { expectError, postOversizedJson, registerUser } from "./helpers/http.js"
 import {
   startE2EFile,
   stopE2EFile,
@@ -22,7 +20,6 @@ import {
 
 describe("e2e secret leakage", () => {
   let ctx: E2EContext
-  let sentinels: string[]
 
   beforeAll(async () => {
     ctx = await startE2EFile()
@@ -38,8 +35,17 @@ describe("e2e secret leakage", () => {
 
     // --- Register and capture the raw token as a sentinel. ---
     const { token, userId } = await registerUser(ctx.api, email, password)
-    const tokenHashHex = createHash("sha256").update(token).digest("hex")
-    const tokenHashBase64 = createHash("sha256").update(token).digest("base64")
+    // Read the actual stored hashes while this user still has exactly one session.
+    const stored = await adminQuery<{
+      password_hash: string
+      token_hash: Buffer
+    }>(
+      `SELECT u.password_hash, s.token_hash FROM microjbase.users u
+       JOIN microjbase.sessions s ON s.user_id = u.id WHERE u.id = $1`,
+      [userId],
+    )
+    expect(stored.rows).toHaveLength(1)
+    const { password_hash, token_hash } = stored.rows[0]!
 
     // --- Successful login and failed login. ---
     const login = await ctx.api.post("/v1/auth/login", { email, password })
@@ -69,10 +75,11 @@ describe("e2e secret leakage", () => {
       "content-type": "application/json",
       authorization: `Bearer ${token}`,
     })
-    await ctx.api.send("POST", "/v1/data/todos", `"${"x".repeat(1_048_576)}"`, {
-      "content-type": "application/json",
-      authorization: `Bearer ${token}`,
-    })
+    expectError(
+      await postOversizedJson(ctx.api, token),
+      413,
+      "VALIDATION_ERROR",
+    )
 
     // --- Database-unavailable window (pool errors included). ---
     await withClient(adminMaintenanceUrl(), async (client) => {
@@ -128,28 +135,23 @@ describe("e2e secret leakage", () => {
     expect(logout.status).toBe(204)
 
     // --- Collect the remaining sentinels. ---
-    const hashRow = await adminQuery<{ password_hash: string }>(
-      "SELECT password_hash FROM microjbase.users WHERE id = $1",
-      [userId],
-    )
     const adminUrl = new URL(adminMaintenanceUrl())
     const postgresPort = adminUrl.port === "" ? 5432 : Number(adminUrl.port)
-    sentinels = [
+    const sentinels = {
       password,
       token,
-      tokenHashHex,
-      tokenHashBase64,
-      hashRow.rows[0]?.password_hash ?? "",
-      "microjbase_e2e_runtime_password",
-      // The exact connection string the server was given.
-      runtimeDatabaseUrl(postgresPort),
-    ]
-
-    // --- Assert against the application process output only. ---
+      "stored session hash (hex)": token_hash.toString("hex"),
+      "stored session hash (base64)": token_hash.toString("base64"),
+      "stored password hash": password_hash,
+      "database password": "microjbase_e2e_runtime_password",
+      "database URL": runtimeDatabaseUrl(postgresPort),
+    }
     const output = ctx.server.output()
-    for (const sentinel of sentinels) {
-      expect(sentinel.length).toBeGreaterThan(0)
-      expect(output).not.toContain(sentinel)
+    for (const [name, sentinel] of Object.entries(sentinels)) {
+      expect(sentinel.length, name).toBeGreaterThan(0)
+      expect(output.includes(sentinel), `application logged ${name}`).toBe(
+        false,
+      )
     }
   })
 })

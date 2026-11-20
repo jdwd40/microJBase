@@ -4,14 +4,12 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
-import { expectError, registerUser } from "./helpers/http.js"
+import { expectError, postOversizedJson, registerUser } from "./helpers/http.js"
 import {
   startE2EFile,
   stopE2EFile,
   type E2EContext,
 } from "./helpers/lifecycle.js"
-
-const MAX_BODY_BYTES = 1_048_576 // production default
 
 describe("e2e malformed and oversized requests", () => {
   let ctx: E2EContext
@@ -37,14 +35,7 @@ describe("e2e malformed and oversized requests", () => {
   })
 
   it("returns 413 VALIDATION_ERROR for a body over the 1 MiB default", async () => {
-    const oversized = `"${"x".repeat(MAX_BODY_BYTES)}"` // MAX_BODY_BYTES + 2 bytes
-    expect(Buffer.byteLength(oversized)).toBe(MAX_BODY_BYTES + 2)
-
-    const response = await ctx.api.send("POST", "/v1/data/todos", oversized, {
-      "content-type": "application/json",
-      authorization: `Bearer ${token}`,
-    })
-
+    const response = await postOversizedJson(ctx.api, token)
     expectError(response, 413, "VALIDATION_ERROR")
     const body = response.body as { error: { message: string } }
     expect(body.error.message).toMatch(/too large/i)
@@ -58,15 +49,5 @@ describe("e2e malformed and oversized requests", () => {
       })
       expectError(response, 400, "VALIDATION_ERROR")
     }
-  })
-
-  it("rejects unknown fields on auth endpoints with 400", async () => {
-    const response = await ctx.api.post("/v1/auth/register", {
-      email: `leo-${ctx.run}@example.test`,
-      password: "correct horse battery staple",
-      role: "admin",
-    })
-
-    expectError(response, 400, "VALIDATION_ERROR")
   })
 })

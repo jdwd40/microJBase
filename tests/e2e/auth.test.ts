@@ -8,7 +8,6 @@ import { adminQuery } from "./helpers/database.js"
 import {
   expectError,
   expectNoStore,
-  publicError,
   registerUser,
   unknownToken,
 } from "./helpers/http.js"
@@ -26,7 +25,8 @@ describe("e2e auth acceptance", () => {
 
   beforeAll(async () => {
     ctx = await startE2EFile()
-    email = `carol-${ctx.run}@example.test`
+    email = `existing-${ctx.run}@example.test`
+    await registerUser(ctx.api, email, PASSWORD)
   })
 
   afterAll(async () => {
@@ -34,6 +34,7 @@ describe("e2e auth acceptance", () => {
   })
 
   it("registers a new user with a 201 envelope", async () => {
+    const email = `new-${ctx.run}@example.test`
     const response = await ctx.api.post("/v1/auth/register", {
       email,
       password: PASSWORD,
@@ -77,13 +78,16 @@ describe("e2e auth acceptance", () => {
     expect((login.body as { data: { token: string } }).data.token).toBeTruthy()
     expectNoStore(login)
 
-    const extra = await ctx.api.post("/v1/auth/register", {
-      email: `dave-${ctx.run}@example.test`,
-      password: PASSWORD,
-      admin: true,
-    })
-    expectError(extra, 400, "VALIDATION_ERROR")
-    expectNoStore(extra)
+    for (const field of ["admin", "role"]) {
+      const extra = await ctx.api.post("/v1/auth/register", {
+        email: `extra-${field}-${ctx.run}@example.test`,
+        password: PASSWORD,
+        [field]: field === "role" ? "admin" : true,
+      })
+      expect(extra.status, `registration with ${field}`).toBe(400)
+      expectError(extra, 400, "VALIDATION_ERROR")
+      expectNoStore(extra)
+    }
 
     const missing = await ctx.api.post("/v1/auth/login", { email })
     expectError(missing, 400, "VALIDATION_ERROR")
@@ -101,7 +105,7 @@ describe("e2e auth acceptance", () => {
 
     expectError(wrongEmail, 401, "INVALID_CREDENTIALS")
     expectError(wrongPassword, 401, "INVALID_CREDENTIALS")
-    expect(publicError(wrongEmail)).toEqual(publicError(wrongPassword))
+    expect(wrongEmail.body).toEqual(wrongPassword.body)
     expectNoStore(wrongEmail)
     expectNoStore(wrongPassword)
   })
