@@ -53,13 +53,14 @@ export interface ExposureRegistryEntry {
  * seeded and the runtime must run the one-time import.
  */
 export interface ExposureRegistryState {
+  readonly defaultAppId?: string
   readonly initialized: boolean
   readonly importedAt: Date | null
   readonly exposed: readonly ExposureRegistryEntry[]
 }
 
 const STATE_SQL = `
-  SELECT initialized, imported_at
+  SELECT initialized, imported_at, default_app_id
   FROM microjbase.exposure_registry_state
   WHERE singleton
 `
@@ -89,6 +90,7 @@ export interface ExposureRegistryRow extends ExposureRegistryEntry {
 }
 
 interface StateRow {
+  default_app_id?: string | null
   initialized: unknown
   imported_at: unknown
 }
@@ -160,6 +162,9 @@ export async function readExposureRegistryState(
 
   const exposedResult = await queryTranslated<EntryRow>(deps, EXPOSED_SQL)
   return Object.freeze({
+    ...(stateRow.default_app_id
+      ? { defaultAppId: stateRow.default_app_id }
+      : {}),
     initialized: stateRow.initialized,
     importedAt: stateRow.imported_at,
     exposed: Object.freeze(exposedResult.rows.map(mapEntryRow)),

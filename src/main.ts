@@ -8,6 +8,7 @@
 // Migrations are NOT run automatically at startup; the operator must apply
 // them beforehand with `npm run migrate` using a privileged role.
 
+import { createApplicationAccess } from "./application-access.js"
 import { pathToFileURL } from "node:url"
 
 import type { FastifyInstance } from "fastify"
@@ -146,7 +147,16 @@ export async function start(): Promise<StartedServer> {
       )
     }
 
-    await assertExposedTableSafety(pool, exposureState.exposed)
+    if (exposureState.defaultAppId && adminPool)
+      throw new AppError(
+        "VALIDATION_ERROR",
+        "Disable the installation-wide admin lane before starting in shared mode",
+        400,
+      )
+    const legacyMappings = exposureState.defaultAppId
+      ? []
+      : exposureState.exposed
+    await assertExposedTableSafety(pool, legacyMappings)
     if (adminPool) {
       await assertSchemaAdminRoleSafety(adminPool)
       await assertSchemaAdminHistoryWriteAccess(adminPool)
@@ -157,7 +167,7 @@ export async function start(): Promise<StartedServer> {
 
     const registry = createSwappableTableRegistry(
       await buildTableRegistry(
-        { mappings: exposureState.exposed },
+        { mappings: legacyMappings },
         { query: runtimeQuery },
       ),
     )
@@ -272,6 +282,9 @@ export async function start(): Promise<StartedServer> {
 
     const httpDeps: ServerDependencies = {
       authService,
+      ...(exposureState.defaultAppId
+        ? { applicationAccess: createApplicationAccess(transactionRunner) }
+        : {}),
       dataService,
       pool,
       ...(adminRoutes === undefined ? {} : { admin: adminRoutes }),

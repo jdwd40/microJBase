@@ -269,3 +269,18 @@ V02-16..V02-18 (B6) expose the internal schema services over `/v1/admin/schema`.
 4. **Every mutation requires an `Idempotency-Key` header** matching the command pattern; there is deliberately no un-keyed mutation path, and the header is validated at the transport layer so malformed keys are `400 VALIDATION_ERROR` rather than command failures. `dry_run` is a body flag on every mutation; dry runs compile and preflight inside a transaction that always rolls back and write no history.
 5. **HTTP handlers never construct SQL and never see raw PostgreSQL errors.** Strict per-endpoint validation (unknown fields rejected, snake_case mapped onto the frozen camelCase commands, confirmations required at the transport layer for destructive commands) precedes the service call; the audited compiler/executor remains the only SQL boundary (D-014/D-026), and every guard SQLSTATE and privilege failure surfaces only as the frozen safe envelopes. Response bodies carry the operation record (snake_case, salted fingerprint) so operators get durable audit without any statement text.
 6. **The admin lane reads migration history, so its grant set grew by one.** The deterministic snapshot (V02-03) reads `microjbase.schema_migrations` through the admin pool, which the original D-025/D-028 out-of-band grants did not cover: the operator procedure now also grants `SELECT ON microjbase.schema_migrations` to the schema-admin role (documented in docs/admin-api.md). Startup still probes and fails closed when any grant is missing.
+
+## D-019 — Explicit shared-mode cutover and app-limited credentials (#28)
+
+The v0.2 global registry cannot distinguish applications with identical
+aliases or authorize per-app roles. Shared deployments retain global users
+and sessions and add operator-approved applications, per-app exposures,
+memberships and audience-bound credentials. Activation is a persistent
+database operation. In shared mode the HTTP layer replaces global data and
+admin routes with scoped routes. Database transactions recheck membership
+and bind both identities. Restrictive PostgreSQL policies also guard each
+approved table. Legacy deployments retain their existing routes. Application
+admins manage ordinary membership and visibility; operators retain DDL.
+See [application isolation](docs/application-isolation.md) for upgrade,
+protocol and benchmark evidence. Integration and end-to-end tests cover
+connection reuse, CRUD, login handoff and revoked access.
