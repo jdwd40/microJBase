@@ -35,14 +35,31 @@ beforeAll(async () => {
       "INSERT INTO microjbase.application_memberships VALUES ($1,$2,'admin')",
       [a, user],
     )
-    await db.query(
-      "INSERT INTO microjbase.application_exposures VALUES ($1,'items','items'),($2,'items','items'),($3,'items','items')",
-      [a, b, c],
-    )
+    for (const [app, schema] of [
+      [a, "app_a"],
+      [b, "app_b"],
+    ] as const) {
+      const ns = quoteIdentifier(schema)
+      await db.query(`CREATE SCHEMA ${ns};
+        CREATE TABLE ${ns}.items (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
+        INSERT INTO ${ns}.items DEFAULT VALUES;
+        ALTER TABLE ${ns}.items ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE ${ns}.items FORCE ROW LEVEL SECURITY;
+        CREATE POLICY fixture_allow ON ${ns}.items FOR ALL USING (true) WITH CHECK (true);
+        GRANT USAGE ON SCHEMA ${ns} TO ${quoteIdentifier(role)};
+        GRANT SELECT,INSERT ON ${ns}.items TO ${quoteIdentifier(role)};`)
+      await db.query(
+        "SELECT microjbase.expose_application_table($1,'items','items')",
+        [app],
+      )
+    }
   })
 })
 afterAll(async () => {
   await pool.end()
+  await withClient(admin, async (db) => {
+    await db.query("DROP SCHEMA IF EXISTS app_a, app_b CASCADE")
+  })
   await cleanMigrations(admin)
 })
 
@@ -61,6 +78,17 @@ async function scope(app: string, finish: "COMMIT" | "ROLLBACK") {
     const alias = await db.query(
       "SELECT * FROM microjbase.resolve_application_table('items')",
     )
+    const visible = await db.query(
+      "SELECT (SELECT count(*)::int FROM app_a.items) AS a, (SELECT count(*)::int FROM app_b.items) AS b",
+    )
+    expect(visible.rows).toEqual([
+      { a: Number(app === a), b: Number(app === b) },
+    ])
+    if (app === b) {
+      await expect(
+        db.query("INSERT INTO app_a.items DEFAULT VALUES"),
+      ).rejects.toMatchObject({ code: "42501" })
+    }
     await db.query(finish)
     return { role: bind.rows[0].role, tables: alias.rows }
   } finally {
