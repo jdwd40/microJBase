@@ -101,3 +101,6 @@ Only configured aliases such as `todos=public.todos` are exposed. Table and colu
 **v0.2.0 release-ready.** V02-00..V02-19 are integrated and verified on `master`: read-only catalogue/snapshots, audited and idempotent typed schema mutations, the durable exposure registry, predefined ownership-policy templates, the opt-in admin API, and the dependency-free management UI. All independent review findings are dispositioned, and the complete verification record is in [docs/release-checklist-v0.2.md](docs/release-checklist-v0.2.md). No tag or production deployment is part of this release preparation.
 
 The implementation sequence for v0.1 is in [ROADMAP.md](ROADMAP.md). AI coding agents must follow [AGENTS.md](AGENTS.md).
+
+For a shared installation with one login and separate application data,
+see [application isolation and migration](docs/application-isolation.md).

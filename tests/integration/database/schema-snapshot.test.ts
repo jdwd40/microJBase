@@ -50,6 +50,7 @@ const APPLIED_MIGRATIONS = [
   "0008_application_registry.sql",
   "0009_application_context.sql",
   "0010_scope_application_table.sql",
+  "0011_shared_mode.sql",
 ] as const
 
 async function withAdminClient<T>(fn: (client: pg.Client) => Promise<T>) {

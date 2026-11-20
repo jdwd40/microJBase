@@ -37,6 +37,7 @@ export interface ServerConfig {
 }
 
 export interface ServerDependencies {
+  applicationAccess?: import("../application-access.js").ApplicationAccess
   authService: AuthService
   dataService: DataService
   pool?: Pool
@@ -60,6 +61,7 @@ export interface ServerDependencies {
 function isNoStorePath(url: string): boolean {
   const path = url.split("?")[0] ?? ""
   return (
+    path.startsWith("/v1/apps/") ||
     path === "/v1/auth" ||
     path.startsWith("/v1/auth/") ||
     path === "/v1/admin" ||
@@ -190,6 +192,9 @@ function registerRoutes(
     registerDataRoutes(app, {
       authService: deps.authService,
       dataService: deps.dataService,
+      ...(deps.applicationAccess
+        ? { applicationAccess: deps.applicationAccess }
+        : {}),
     }),
   )
 
