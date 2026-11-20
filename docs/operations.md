@@ -6,16 +6,19 @@ Backup, restore, and upgrade procedures for a deployment per
 
 ## Backup
 
-The simplest reliable backup is a `pg_dump` custom-format archive taken with
-the migration/admin role. `pg_dump` output is consistent per-table; for a
-tiny application a brief maintenance window is the safe choice.
+Take a full custom-format archive on the database host. The documented
+migration owner is subject to FORCE ROW LEVEL SECURITY and cannot take a
+complete dump. The local PostgreSQL maintenance account can read all rows.
+Run these commands from a private backup directory as the operator:
 
 ```bash
-set -a; . /etc/microjbase/migration.env; set +a
-pg_dump --format=custom --compress=9 \
-  --file="microjbase-$(date -u +%F-%H%M%S).dump" \
-  "$MIGRATION_DATABASE_URL"
+umask 077
+archive="microjbase-$(date -u +%F-%H%M%S).dump"
+sudo -u postgres pg_dump --format=custom --compress=9 --dbname=microjbase > "$archive"
 ```
+
+Check the command's exit status before retaining or transferring the archive.
+Keep the maintenance account separate from application credentials.
 
 What the dump contains: schema (all migrations applied), table data, and the
 runtime grants relevant to data. What it does **not** contain: the role
@@ -68,13 +71,12 @@ On Debian or Ubuntu the examples below use local peer authentication.
    Load the updated environment in the restore shell before running the next
    commands. Keep a copy of the original configuration for rollback.
 
-4. **Restore into the recreated application database** using the
-   migration/admin URL (here the URI's database component is correct — it
-   names the fresh restore target):
+4. **Restore into the fresh target** using the local maintenance account.
+   Set `archive` to the selected backup path in the operator shell:
 
    ```bash
-   pg_restore --exit-on-error --single-transaction \
-     --dbname="$MIGRATION_DATABASE_URL" microjbase-<timestamp>.dump
+   sudo -u postgres pg_restore --exit-on-error --single-transaction \
+     --dbname=microjbase_restored < "$archive"
    ```
 
    Schema-migration bookkeeping (`microjbase.schema_migrations`) is restored
