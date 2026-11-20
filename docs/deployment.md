@@ -70,7 +70,6 @@ shell expansion:
 
 ```ini
 DATABASE_URL=postgres://microjbase_runtime:<strong-random-password>@127.0.0.1:5432/microjbase
-MIGRATION_DATABASE_URL=postgres://microjbase_admin:<strong-random-password>@127.0.0.1:5432/microjbase
 HOST=127.0.0.1
 PORT=3000
 LOG_LEVEL=info
@@ -79,6 +78,10 @@ MICROJBASE_TABLES=todos=public.todos
 TRUST_PROXY=false
 MAX_BODY_BYTES=1048576
 ```
+
+Keep the migration credential in a separate, operator-only mode 0600 file
+`/etc/microjbase/migration.env` containing only `MIGRATION_DATABASE_URL`.
+Use the microjbase_admin role and the same database as the runtime URL.
 
 Variable contract: `ARCHITECTURE.md` §6. Secrets are never committed;
 `.env` files in the repo are development-only.
@@ -89,7 +92,7 @@ Migrations are forward-only, run explicitly — never automatically at startup.
 They take a PostgreSQL advisory lock, so concurrent runs serialize safely:
 
 ```bash
-set -a; . /etc/microjbase/microjbase.env; set +a
+set -a; . /etc/microjbase/migration.env; set +a
 cd /opt/microjbase/app
 npm run migrate
 ```
@@ -109,6 +112,9 @@ GRANT SELECT ON microjbase.schema_migrations TO microjbase_runtime;
 GRANT SELECT, INSERT ON microjbase.users TO microjbase_runtime;
 
 GRANT SELECT, INSERT, UPDATE ON microjbase.sessions TO microjbase_runtime;
+
+GRANT SELECT ON microjbase.exposure_registry, microjbase.exposure_registry_state TO microjbase_runtime;
+GRANT EXECUTE ON FUNCTION microjbase.import_exposure_registry(jsonb) TO microjbase_runtime;
 
 GRANT USAGE ON SCHEMA public TO microjbase_runtime;
 

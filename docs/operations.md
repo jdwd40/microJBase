@@ -11,7 +11,7 @@ the migration/admin role. `pg_dump` output is consistent per-table; for a
 tiny application a brief maintenance window is the safe choice.
 
 ```bash
-set -a; . /etc/microjbase/microjbase.env; set +a
+set -a; . /etc/microjbase/migration.env; set +a
 pg_dump --format=custom --compress=9 \
   --file="microjbase-$(date -u +%F-%H%M%S).dump" \
   "$MIGRATION_DATABASE_URL"
@@ -23,15 +23,8 @@ definitions themselves (`CREATE ROLE` statements) — keep the role/password
 provisioning SQL from deployment under version control or in your secrets
 manager, because a restore into a fresh cluster needs them first.
 
-**Take the backup with the application stopped or during a quiet window.** The
-dump is not crash-consistent with concurrent writes; writes in flight during
-the dump may be absent or half-visible. For v0.1 workloads:
-
-```bash
-sudo systemctl stop microjbase
-pg_dump ... (command above)
-sudo systemctl start microjbase
-```
+PostgreSQL takes a consistent snapshot while the application is running.
+For a cutover, pause writes before the final dump so later writes are retained.
 
 Copy the `.dump` file off the host. Test restores periodically — an untested
 backup is not a backup.
@@ -44,20 +37,10 @@ starting the app never runs "down" migrations — but it also never repairs
 schema drift; restore to the application version that took the backup, then
 upgrade normally.
 
-Database-level operations (dropping/creating the database) must run while
-connected to a **different** database — you cannot drop the database you are
-currently connected to. Define a maintenance URL that points at the standard
-`postgres` maintenance database (same host/admin role, different database):
-
-```bash
-set -a; . /etc/microjbase/microjbase.env; set +a
-MAINTENANCE_DATABASE_URL='postgres://microjbase_admin:<strong-random-password>@127.0.0.1:5432/postgres'
-```
-
-Every `psql` command in steps 3 below uses this maintenance URL — not
-`MIGRATION_DATABASE_URL`. (A URI's database component selects the connection
-database; appending `-d postgres` to a psql invocation does **not** reliably
-override a connection URL that already names another database.)
+Run database creation from a cluster administrator's maintenance session on
+the database host. The migration role in the deployment guide lacks CREATEDB.
+Keep cluster-administrator credentials outside the application environment.
+On Debian or Ubuntu the examples below use local peer authentication.
 
 1. **Provision roles/database** if the cluster is fresh (same SQL as
    deployment §2.1), with the same passwords as at backup time, or update
@@ -72,28 +55,25 @@ override a connection URL that already names another database.)
    sudo systemctl stop microjbase
    ```
 
-3. **Terminate active connections, then drop and recreate the database**
-   (restoring into a dirty database risks constraint conflicts). All three
-   commands connect through the maintenance URL to the `postgres` database,
-   never to `microjbase` itself:
+3. **Create a fresh restore target while retaining the original database.**
+   Choose an unused database name. If creation fails, stop and correct the
+   error. Leave the existing database available for rollback.
 
    ```bash
-   psql "$MAINTENANCE_DATABASE_URL" \
-     -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
-         WHERE datname = 'microjbase' AND pid <> pg_backend_pid();"
-
-   psql "$MAINTENANCE_DATABASE_URL" -c 'DROP DATABASE microjbase;'
-
-   psql "$MAINTENANCE_DATABASE_URL" \
-     -c 'CREATE DATABASE microjbase OWNER microjbase_admin;'
+   sudo -u postgres createdb --owner=microjbase_admin microjbase_restored
    ```
+
+   Set the database name in the migration, runtime and any enabled schema-admin
+   connection URLs to the new target, preserving each role and its credentials.
+   Load the updated environment in the restore shell before running the next
+   commands. Keep a copy of the original configuration for rollback.
 
 4. **Restore into the recreated application database** using the
    migration/admin URL (here the URI's database component is correct — it
-   names the freshly recreated `microjbase`):
+   names the fresh restore target):
 
    ```bash
-   pg_restore --clean --if-exists --exit-on-error \
+   pg_restore --exit-on-error --single-transaction \
      --dbname="$MIGRATION_DATABASE_URL" microjbase-<timestamp>.dump
    ```
 
@@ -136,7 +116,7 @@ npm ci
 npm run build
 
 # 3. Forward migrations — explicit, advisory-locked, idempotent.
-set -a; . /etc/microjbase/microjbase.env; set +a
+set -a; . /etc/microjbase/migration.env; set +a
 npm run migrate
 
 # 4. Restart and verify.
