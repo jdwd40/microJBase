@@ -28,7 +28,7 @@ export interface ApiClient {
   send(
     method: string,
     path: string,
-    body?: string,
+    body?: string | AsyncIterable<Uint8Array>,
     headers?: Record<string, string>,
   ): Promise<ApiResponse>
 }
@@ -37,13 +37,14 @@ export function createApi(baseUrl: string): ApiClient {
   const send = async (
     method: string,
     path: string,
-    body?: string,
+    body?: string | AsyncIterable<Uint8Array>,
     headers: Record<string, string> = {},
   ): Promise<ApiResponse> => {
     const response = await fetch(`${baseUrl}${path}`, {
       method,
       headers,
       ...(body !== undefined ? { body } : {}),
+      ...(typeof body === "object" ? { duplex: "half" as const } : {}),
     })
     const text = await response.text()
     let parsed: unknown = null
@@ -87,6 +88,21 @@ export function createApi(baseUrl: string): ApiClient {
     send: (method, path, body, headers = {}) =>
       send(method, path, body, headers),
   }
+}
+
+/** Stream a JSON string two bytes over the 1 MiB default. Without Content-Length,
+ * the server reads the payload before sending 413, so fetch can receive the response. */
+export function postOversizedJson(
+  api: ApiClient,
+  token: string,
+): Promise<ApiResponse> {
+  async function* body() {
+    yield Buffer.from('"' + "x".repeat(1_048_576) + '"')
+  }
+  return api.send("POST", "/v1/data/todos", body(), {
+    "content-type": "application/json",
+    authorization: `Bearer ${token}`,
+  })
 }
 
 /** Short random suffix so repeated local runs never collide on data. */

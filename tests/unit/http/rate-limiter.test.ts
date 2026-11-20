@@ -11,21 +11,17 @@ describe("InMemoryRateLimiter", () => {
     expect(result.state.attempts).toBe(1)
   })
 
-  it("allows attempts up to the configured threshold", () => {
+  it("allows the configured number of attempts and blocks the next one", () => {
     const limiter = new InMemoryRateLimiter({ attemptsPerWindow: 3 })
-    expect(limiter.check("ip:1").allowed).toBe(true)
-    expect(limiter.check("ip:1").allowed).toBe(true)
-    expect(limiter.check("ip:1").allowed).toBe(true)
-  })
-
-  it("blocks the attempt beyond the threshold", () => {
-    const limiter = new InMemoryRateLimiter({ attemptsPerWindow: 2 })
-    limiter.check("ip:1")
-    limiter.check("ip:1")
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const result = limiter.check("ip:1")
+      expect(result.allowed, `attempt ${attempt}`).toBe(true)
+      expect(result.state.attempts).toBe(attempt)
+    }
     const blocked = limiter.check("ip:1")
     expect(blocked.allowed).toBe(false)
     expect(blocked.retryAfterSeconds).toBeGreaterThan(0)
-    expect(blocked.state.attempts).toBe(2)
+    expect(blocked.state.attempts).toBe(3)
   })
 
   it("resets the counter after the window expires", () => {

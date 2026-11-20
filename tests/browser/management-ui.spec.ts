@@ -127,7 +127,7 @@ test("schema overview, empty history, and the exposed table detail", async ({
   // Table detail of the exposed table: RLS and exposure render.
   await page.getByRole("button", { name: "public.todos" }).click()
   await expect(
-    page.getByRole("heading", { name: "public.todos" }),
+    page.getByRole("heading", { name: "public.todos", level: 1, exact: true }),
   ).toBeVisible()
   await expect(page.getByText("Exposed as todos").first()).toBeVisible()
   await expect(page.getByText("Enabled, forced")).toBeVisible()
@@ -257,7 +257,11 @@ test("seeded table renders columns, constraints, indexes, and RLS state", async 
   await signIn(page)
   await page.getByRole("button", { name: "e2e_admin.notes" }).click()
   await expect(
-    page.getByRole("heading", { name: "e2e_admin.notes" }),
+    page.getByRole("heading", {
+      name: "e2e_admin.notes",
+      level: 1,
+      exact: true,
+    }),
   ).toBeVisible()
 
   // Columns section carries the added column and its uuid type; the managed

@@ -11,6 +11,7 @@ import {
   publicError,
   randomUuid,
   registerUser,
+  type RegisteredUser,
 } from "./helpers/http.js"
 import {
   startE2EFile,
@@ -25,16 +26,26 @@ import {
 
 describe("e2e proof of life", () => {
   let ctx: E2EContext
-  let alice: { token: string; userId: string; email: string }
-  let bob: { token: string; userId: string; email: string }
+  let alice: RegisteredUser
+  let bob: RegisteredUser
   let todoId: string
 
   beforeAll(async () => {
     ctx = await startE2EFile()
+    alice = await registerUser(ctx.api, `alice-${ctx.run}@example.test`)
+    bob = await registerUser(ctx.api, `bob-${ctx.run}@example.test`)
+    const fixture = await ctx.api.post(
+      "/v1/data/todos",
+      { title: "Alice's private todo" },
+      alice.token,
+    )
+    expect(fixture.status).toBe(201)
+    todoId = (fixture.body as { data: { id: string } }).data.id
   })
 
   afterAll(async () => {
     await stopE2EFile(ctx)
+    expect(ctx.server.process.exitCode).toBe(0)
   })
 
   it("reports healthy status and database readiness", async () => {
@@ -48,9 +59,7 @@ describe("e2e proof of life", () => {
     expect(response.headers.get("x-request-id")).toBeTruthy()
   })
 
-  it("registers Alice and lets her create, read, and update a todo", async () => {
-    alice = await registerUser(ctx.api, `alice-${ctx.run}@example.test`)
-
+  it("lets the owner create, read, update and delete a todo", async () => {
     const created = await ctx.api.post(
       "/v1/data/todos",
       { title: "buy milk" },
@@ -58,8 +67,8 @@ describe("e2e proof of life", () => {
     )
     expect(created.status).toBe(201)
     const row = (created.body as { data: Record<string, unknown> }).data
-    todoId = row.id as string
-    expect(todoId).toMatch(
+    const ownedId = row.id as string
+    expect(ownedId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     )
     expect(row.title).toBe("buy milk")
@@ -74,16 +83,16 @@ describe("e2e proof of life", () => {
     const listedIds = (listed.body as { data: { id: string }[] }).data.map(
       (item) => item.id,
     )
-    expect(listedIds).toContain(todoId)
+    expect(listedIds).toContain(ownedId)
 
-    const fetched = await ctx.api.get(`/v1/data/todos/${todoId}`, alice.token)
+    const fetched = await ctx.api.get(`/v1/data/todos/${ownedId}`, alice.token)
     expect(fetched.status).toBe(200)
     expect((fetched.body as { data: { title: string } }).data.title).toBe(
       "buy milk",
     )
 
     const updated = await ctx.api.patch(
-      `/v1/data/todos/${todoId}`,
+      `/v1/data/todos/${ownedId}`,
       { title: "buy oat milk", completed: true },
       alice.token,
     )
@@ -95,14 +104,20 @@ describe("e2e proof of life", () => {
     // Independent out-of-band proof the write reached PostgreSQL.
     const stored = await adminQuery<{ title: string; completed: boolean }>(
       "SELECT title, completed FROM public.todos WHERE id = $1",
-      [todoId],
+      [ownedId],
     )
     expect(stored.rows).toEqual([{ title: "buy oat milk", completed: true }])
+    const deleted = await ctx.api.del(`/v1/data/todos/${ownedId}`, alice.token)
+    expect(deleted.status).toBe(204)
+    expect(deleted.text).toBe("")
+
+    const gone = await ctx.api.get(`/v1/data/todos/${ownedId}`, alice.token)
+    expectError(gone, 404, "ROW_NOT_FOUND")
+    const bobList = await ctx.api.get("/v1/data/todos", bob.token)
+    expect((bobList.body as { data: unknown[] }).data).toEqual([])
   })
 
   it("isolates Bob from Alice's todo via PostgreSQL RLS", async () => {
-    bob = await registerUser(ctx.api, `bob-${ctx.run}@example.test`)
-
     const bobList = await ctx.api.get("/v1/data/todos", bob.token)
     expect(bobList.status).toBe(200)
     expect((bobList.body as { data: unknown[] }).data).toEqual([])
@@ -146,7 +161,7 @@ describe("e2e proof of life", () => {
       "SELECT title FROM public.todos WHERE id = $1",
       [todoId],
     )
-    expect(stored.rows[0]?.title).toBe("buy oat milk")
+    expect(stored.rows[0]?.title).toBe("Alice's private todo")
   })
 
   it("rejects a foreign ownership claim on create with 409 and creates no row", async () => {
@@ -197,29 +212,13 @@ describe("e2e proof of life", () => {
     expectError(bobGet, 404, "ROW_NOT_FOUND")
   })
 
-  it("keeps Alice fully functional and able to delete her own todo", async () => {
-    const fetched = await ctx.api.get(`/v1/data/todos/${todoId}`, alice.token)
-    expect(fetched.status).toBe(200)
-
-    const deleted = await ctx.api.del(`/v1/data/todos/${todoId}`, alice.token)
-    expect(deleted.status).toBe(204)
-    expect(deleted.text).toBe("")
-
-    const gone = await ctx.api.get(`/v1/data/todos/${todoId}`, alice.token)
-    expectError(gone, 404, "ROW_NOT_FOUND")
-
-    // Bob's view never contained the row.
-    const bobList = await ctx.api.get("/v1/data/todos", bob.token)
-    expect((bobList.body as { data: unknown[] }).data).toEqual([])
-  })
-
   it("preserves sessions and data across a full server restart", async () => {
     // Fresh state for this scenario.
-    alice = await registerUser(ctx.api, `alice2-${ctx.run}@example.test`)
+    const owner = await registerUser(ctx.api, `alice2-${ctx.run}@example.test`)
     const created = await ctx.api.post(
       "/v1/data/todos",
       { title: "survive restart" },
-      alice.token,
+      owner.token,
     )
     const rowId = (created.body as { data: { id: string } }).data.id
 
@@ -232,17 +231,17 @@ describe("e2e proof of life", () => {
       const newApi = createApi(restarted.baseUrl)
 
       // The old bearer session is still valid.
-      const me = await newApi.get("/v1/auth/me", alice.token)
+      const me = await newApi.get("/v1/auth/me", owner.token)
       expect(me.status).toBe(200)
-      expect((me.body as { data: { id: string } }).data.id).toBe(alice.userId)
+      expect((me.body as { data: { id: string } }).data.id).toBe(owner.userId)
 
       // The data is still there.
-      const fetched = await newApi.get(`/v1/data/todos/${rowId}`, alice.token)
+      const fetched = await newApi.get(`/v1/data/todos/${rowId}`, owner.token)
       expect(fetched.status).toBe(200)
 
       // Login works too.
       const login = await newApi.post("/v1/auth/login", {
-        email: alice.email,
+        email: owner.email,
         password: "correct horse battery staple",
       })
       expect(login.status).toBe(200)
@@ -252,9 +251,8 @@ describe("e2e proof of life", () => {
       const blocked = await newApi.get(`/v1/data/todos/${rowId}`, bob2.token)
       expectError(blocked, 404, "ROW_NOT_FOUND")
 
-      await restarted.stop()
-      expect(restarted.process.exitCode).toBe(0)
       ctx.server = restarted
+      ctx.api = newApi
     } catch (error) {
       await restarted.stop().catch(() => undefined)
       throw error

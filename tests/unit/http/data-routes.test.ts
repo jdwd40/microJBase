@@ -1,357 +1,172 @@
-import { randomUUID } from "node:crypto"
-
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import type { FastifyInstance } from "fastify"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import { createAuthService } from "../../../src/auth/index.js"
-import { createDataService } from "../../../src/data/index.js"
+import { DataError } from "../../../src/data/index.js"
 import { buildServer } from "../../../src/http/index.js"
-import type {
-  AuthRepository,
-  AuthenticatedUser,
-  DataRepository,
-  DataRow,
-  ExposedTable,
-  Page,
-  RequestIdentity,
-  Session,
-  TableRegistry,
-  User,
-  UserId,
-  UserRecord,
-} from "../../../src/contracts/index.js"
+import { serviceSpies } from "./service-spies.js"
 
-const TEST_TABLE: ExposedTable = {
-  alias: "items",
-  schema: "public",
-  table: "items",
-  primaryKey: "id",
-  readableColumns: ["id", "name"],
-  insertableColumns: ["id", "name"],
-  updatableColumns: ["name"],
+const token = "issued-token"
+const user = {
+  id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  email: "alice@example.com",
 }
-
-class FakeAuthRepository implements AuthRepository {
-  users = new Map<string, UserRecord>()
-  sessions = new Map<string, Session>()
-
-  async createUserAndSession(input: {
-    email: string
-    passwordHash: string
-    tokenHash: Buffer
-    expiresAt: Date
-  }): Promise<{ user: User; session: Session }> {
-    const user: UserRecord = {
-      id: randomUUID(),
-      email: input.email,
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      passwordHash: input.passwordHash,
-    }
-    const session: Session = {
-      id: randomUUID(),
-      userId: user.id,
-      tokenHash: Buffer.from(input.tokenHash),
-      expiresAt: input.expiresAt,
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      revokedAt: null,
-    }
-    this.users.set(user.email, user)
-    this.sessions.set(session.tokenHash.toString("hex"), session)
-    return {
-      user: { id: user.id, email: user.email, createdAt: user.createdAt },
-      session,
-    }
-  }
-
-  async findByEmail(email: string): Promise<UserRecord | null> {
-    return this.users.get(email) ?? null
-  }
-
-  async createSession(input: {
-    userId: UserId
-    tokenHash: Buffer
-    expiresAt: Date
-  }): Promise<Session> {
-    const session: Session = {
-      id: randomUUID(),
-      userId: input.userId,
-      tokenHash: Buffer.from(input.tokenHash),
-      expiresAt: input.expiresAt,
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      revokedAt: null,
-    }
-    this.sessions.set(session.tokenHash.toString("hex"), session)
-    return session
-  }
-
-  async findActiveUserByTokenHash(
-    tokenHash: Buffer,
-    now: Date,
-  ): Promise<AuthenticatedUser | null> {
-    void now
-    const session = this.sessions.get(tokenHash.toString("hex"))
-    if (!session) return null
-    const user = [...this.users.values()].find((u) => u.id === session.userId)
-    if (!user) return null
-    return { id: user.id, email: user.email }
-  }
-
-  async revokeByTokenHash(
-    tokenHash: Buffer,
-    revokedAt: Date,
-  ): Promise<boolean> {
-    void tokenHash
-    void revokedAt
-    return false
-  }
-}
-
-class FakeTableRegistry implements TableRegistry {
-  get(alias: string): ExposedTable | null {
-    if (alias === TEST_TABLE.alias) return TEST_TABLE
-    return null
-  }
-
-  list(): readonly ExposedTable[] {
-    return [TEST_TABLE]
-  }
-}
-
-type StoredRow = DataRow & { _ownerId: string }
-
-class FakeDataRepository implements DataRepository {
-  rows = new Map<string, StoredRow[]>()
-
-  seed(alias: string, ownerId: string, row: DataRow): void {
-    const stored: StoredRow = { ...row, _ownerId: ownerId }
-    const list = this.rows.get(alias) ?? []
-    list.push(stored)
-    this.rows.set(alias, list)
-  }
-
-  private publicRow(stored: StoredRow): DataRow {
-    const { _ownerId, ...rest } = stored
-    void _ownerId
-    return rest
-  }
-
-  private owned(alias: string, userId: string): StoredRow[] {
-    return (this.rows.get(alias) ?? []).filter((r) => r._ownerId === userId)
-  }
-
-  async list(input: {
-    identity: RequestIdentity
-    table: ExposedTable
-    limit: number
-    offset: number
-  }): Promise<Page<DataRow>> {
-    const owned = this.owned(input.table.alias, input.identity.userId)
-    const sorted = [...owned].sort((a, b) =>
-      String(a["id"]).localeCompare(String(b["id"])),
-    )
-    const sliced = sorted.slice(input.offset, input.offset + input.limit)
-    return {
-      items: sliced.map((r) => this.publicRow(r)),
-      limit: input.limit,
-      offset: input.offset,
-    }
-  }
-
-  async findById(input: {
-    identity: RequestIdentity
-    table: ExposedTable
-    id: string
-  }): Promise<DataRow | null> {
-    const owned = this.owned(input.table.alias, input.identity.userId)
-    const row = owned.find((r) => r["id"] === input.id)
-    return row ? this.publicRow(row) : null
-  }
-
-  async create(input: {
-    identity: RequestIdentity
-    table: ExposedTable
-    values: DataRow
-  }): Promise<DataRow> {
-    const row: StoredRow = { ...input.values, _ownerId: input.identity.userId }
-    const list = this.rows.get(input.table.alias) ?? []
-    list.push(row)
-    this.rows.set(input.table.alias, list)
-    return this.publicRow(row)
-  }
-
-  async updateById(input: {
-    identity: RequestIdentity
-    table: ExposedTable
-    id: string
-    values: DataRow
-  }): Promise<DataRow | null> {
-    const owned = this.owned(input.table.alias, input.identity.userId)
-    const index = owned.findIndex((r) => r["id"] === input.id)
-    if (index === -1) return null
-    const target = owned[index]
-    if (target === undefined) return null
-    Object.assign(target, input.values)
-    return this.publicRow(target)
-  }
-
-  async deleteById(input: {
-    identity: RequestIdentity
-    table: ExposedTable
-    id: string
-  }): Promise<boolean> {
-    const owned = this.owned(input.table.alias, input.identity.userId)
-    const index = owned.findIndex((r) => r["id"] === input.id)
-    if (index === -1) return false
-    const list = this.rows.get(input.table.alias)
-    if (list) {
-      const fullIndex = list.findIndex(
-        (r) => r["id"] === input.id && r._ownerId === input.identity.userId,
-      )
-      if (fullIndex !== -1) list.splice(fullIndex, 1)
-    }
-    return true
-  }
-}
-
-async function buildTestServer(
-  authRepository: FakeAuthRepository,
-  dataRepository: FakeDataRepository,
-): Promise<FastifyInstance> {
-  const authService = createAuthService(authRepository, {
-    sessionTtlSeconds: 3600,
-    now: () => new Date("2026-01-01T00:00:00.000Z"),
-  })
-  const dataService = createDataService(new FakeTableRegistry(), dataRepository)
-  return buildServer(
-    { authService, dataService },
-    { disableRequestLogging: true },
-  )
-}
+const id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+const route = "/v1/data/items"
+const headers = { authorization: `Bearer ${token}` }
+const target = { identity: { userId: user.id }, tableAlias: "items" }
 
 describe("data routes", () => {
   let app: FastifyInstance
-  let authRepository: FakeAuthRepository
-  let dataRepository: FakeDataRepository
-  let token: string
-  let userId: string
+  let services: ReturnType<typeof serviceSpies>
 
   beforeEach(async () => {
-    authRepository = new FakeAuthRepository()
-    dataRepository = new FakeDataRepository()
-    app = await buildTestServer(authRepository, dataRepository)
-
-    const register = await app.inject({
-      method: "POST",
-      url: "/v1/auth/register",
-      payload: {
-        email: "alice@example.com",
-        password: "correct horse battery staple",
-      },
-    })
-    expect(register.statusCode).toBe(201)
-    const body = register.json()
-    token = body.data.token
-    userId = body.data.user.id
+    services = serviceSpies()
+    services.authService.authenticate.mockResolvedValue(user)
+    app = await buildServer(services, { disableRequestLogging: true })
   })
-
   afterEach(async () => {
     await app.close()
   })
 
-  it("lists rows with pagination envelope", async () => {
-    dataRepository.seed("items", userId, { id: randomUUID(), name: "first" })
-    dataRepository.seed("items", userId, { id: randomUUID(), name: "second" })
-
+  it("parses pagination and returns the page and metadata", async () => {
+    const rows = [{ id, name: "first" }]
+    services.dataService.list.mockResolvedValue({
+      items: rows,
+      limit: 1,
+      offset: 0,
+    })
     const response = await app.inject({
       method: "GET",
-      url: "/v1/data/items?limit=1&offset=0",
-      headers: { authorization: `Bearer ${token}` },
+      url: route + "?limit=1&offset=0",
+      headers,
+    })
+    expect(services.authService.authenticate).toHaveBeenCalledExactlyOnceWith(
+      token,
+    )
+    expect(services.dataService.list).toHaveBeenCalledExactlyOnceWith({
+      ...target,
+      limit: 1,
+      offset: 0,
     })
     expect(response.statusCode).toBe(200)
-    const body = response.json()
-    expect(body.data).toHaveLength(1)
-    expect(body.meta).toEqual({ limit: 1, offset: 0 })
+    expect(response.json()).toEqual({
+      data: rows,
+      error: null,
+      meta: { limit: 1, offset: 0 },
+    })
   })
 
-  it("gets one row", async () => {
-    const id = randomUUID()
-    dataRepository.seed("items", userId, { id, name: "item" })
-
+  it("gets the row identified by the path", async () => {
+    const row = { id, name: "item" }
+    services.dataService.get.mockResolvedValue(row)
     const response = await app.inject({
       method: "GET",
-      url: `/v1/data/items/${id}`,
-      headers: { authorization: `Bearer ${token}` },
+      url: route + "/" + id,
+      headers,
+    })
+    expect(services.dataService.get).toHaveBeenCalledExactlyOnceWith({
+      ...target,
+      id,
     })
     expect(response.statusCode).toBe(200)
-    expect(response.json().data.name).toBe("item")
+    expect(response.json()).toEqual({ data: row, error: null })
   })
 
-  it("creates a row", async () => {
+  it("sends the posted values to create and returns the stored row", async () => {
+    const values = { name: "new item" }
+    const row = { id, ...values }
+    services.dataService.create.mockResolvedValue(row)
     const response = await app.inject({
       method: "POST",
-      url: "/v1/data/items",
-      headers: { authorization: `Bearer ${token}` },
-      payload: { name: "new item" },
+      url: route,
+      headers,
+      payload: values,
+    })
+    expect(services.dataService.create).toHaveBeenCalledExactlyOnceWith({
+      ...target,
+      values,
     })
     expect(response.statusCode).toBe(201)
-    expect(response.json().data.name).toBe("new item")
+    expect(response.json()).toEqual({ data: row, error: null })
   })
 
-  it("updates a row", async () => {
-    const id = randomUUID()
-    dataRepository.seed("items", userId, { id, name: "old" })
-
+  it("patches the identified row and returns the stored result", async () => {
+    const values = { name: "updated" }
+    const row = { id, ...values }
+    services.dataService.update.mockResolvedValue(row)
     const response = await app.inject({
       method: "PATCH",
-      url: `/v1/data/items/${id}`,
-      headers: { authorization: `Bearer ${token}` },
-      payload: { name: "updated" },
+      url: route + "/" + id,
+      headers,
+      payload: values,
+    })
+    expect(services.dataService.update).toHaveBeenCalledExactlyOnceWith({
+      ...target,
+      id,
+      values,
     })
     expect(response.statusCode).toBe(200)
-    expect(response.json().data.name).toBe("updated")
+    expect(response.json()).toEqual({ data: row, error: null })
   })
 
-  it("deletes a row", async () => {
-    const id = randomUUID()
-    dataRepository.seed("items", userId, { id, name: "to delete" })
-
+  it("deletes the identified row and returns an empty 204", async () => {
+    services.dataService.delete.mockResolvedValue(undefined)
     const response = await app.inject({
       method: "DELETE",
-      url: `/v1/data/items/${id}`,
-      headers: { authorization: `Bearer ${token}` },
+      url: route + "/" + id,
+      headers,
+    })
+    expect(services.dataService.delete).toHaveBeenCalledExactlyOnceWith({
+      ...target,
+      id,
     })
     expect(response.statusCode).toBe(204)
+    expect(response.body).toBe("")
   })
 
-  it("returns 404 for unknown table", async () => {
+  it("omits unspecified pagination and maps an unexposed table to 404", async () => {
+    services.dataService.list.mockRejectedValue(
+      new DataError("TABLE_NOT_FOUND", "Table not found", 404),
+    )
     const response = await app.inject({
       method: "GET",
       url: "/v1/data/unknown",
-      headers: { authorization: `Bearer ${token}` },
+      headers,
+    })
+    expect(services.dataService.list).toHaveBeenCalledExactlyOnceWith({
+      ...target,
+      tableAlias: "unknown",
     })
     expect(response.statusCode).toBe(404)
-    expect(response.json().error.code).toBe("TABLE_NOT_FOUND")
+    expect(response.json()).toMatchObject({
+      data: null,
+      error: { code: "TABLE_NOT_FOUND" },
+    })
   })
 
-  it("returns 404 for hidden row", async () => {
-    const id = randomUUID()
-    dataRepository.seed("items", randomUUID(), { id, name: "other user" })
-
+  it("maps an invisible row to the public row error", async () => {
+    services.dataService.get.mockRejectedValue(
+      new DataError("ROW_NOT_FOUND", "Row not found", 404),
+    )
     const response = await app.inject({
       method: "GET",
-      url: `/v1/data/items/${id}`,
-      headers: { authorization: `Bearer ${token}` },
+      url: route + "/" + id,
+      headers,
     })
     expect(response.statusCode).toBe(404)
-    expect(response.json().error.code).toBe("ROW_NOT_FOUND")
+    expect(response.json()).toMatchObject({
+      data: null,
+      error: { code: "ROW_NOT_FOUND" },
+    })
   })
 
-  it("requires bearer for data routes", async () => {
-    const response = await app.inject({
-      method: "GET",
-      url: "/v1/data/items",
-    })
+  it("rejects a missing bearer before accessing data", async () => {
+    const response = await app.inject({ method: "GET", url: route })
     expect(response.statusCode).toBe(401)
-    expect(response.json().error.code).toBe("AUTH_REQUIRED")
+    expect(response.json()).toMatchObject({
+      data: null,
+      error: { code: "AUTH_REQUIRED" },
+    })
+    expect(services.dataService.list).not.toHaveBeenCalled()
   })
 })

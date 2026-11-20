@@ -5,12 +5,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import { adminQuery } from "./helpers/database.js"
-import {
-  expectError,
-  publicError,
-  randomUuid,
-  registerUser,
-} from "./helpers/http.js"
+import { expectError, randomUuid, registerUser } from "./helpers/http.js"
 import {
   startE2EFile,
   stopE2EFile,
@@ -20,13 +15,11 @@ import {
 describe("e2e pagination and data errors", () => {
   let ctx: E2EContext
   let alice: { token: string; userId: string; email: string }
-  let bob: { token: string; userId: string; email: string }
   let aliceRowId: string
 
   beforeAll(async () => {
     ctx = await startE2EFile()
     alice = await registerUser(ctx.api, `ivy-${ctx.run}@example.test`)
-    bob = await registerUser(ctx.api, `judy-${ctx.run}@example.test`)
 
     // HTTP create is proven here; the remaining rows for the pagination
     // fixture are seeded with admin SQL because it is materially faster and
@@ -140,17 +133,6 @@ describe("e2e pagination and data errors", () => {
       alice.token,
     )
     expectError(missing, 404, "ROW_NOT_FOUND")
-  })
-
-  it("makes an RLS-hidden row indistinguishable from a missing row", async () => {
-    const hidden = await ctx.api.get(`/v1/data/todos/${aliceRowId}`, bob.token)
-    const missing = await ctx.api.get(
-      `/v1/data/todos/${randomUuid()}`,
-      bob.token,
-    )
-
-    expectError(hidden, 404, "ROW_NOT_FOUND")
-    expect(publicError(hidden)).toEqual(publicError(missing))
   })
 
   it("rejects empty create and patch bodies with 400", async () => {

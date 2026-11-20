@@ -39,27 +39,20 @@ function registryOf(aliases: string[]): TableRegistry {
 }
 
 describe("createSwappableTableRegistry", () => {
-  it("delegates get/list to the current registry", () => {
+  it("resolves only the current snapshot before and after replacement and unexposure", () => {
     const holder = createSwappableTableRegistry(registryOf(["a", "b"]))
     expect(holder.get("a")?.table).toBe("a")
     expect(holder.get("missing")).toBeNull()
     expect(holder.list().map((entry) => entry.alias)).toEqual(["a", "b"])
-  })
 
-  it("serves the new snapshot after an atomic replace", () => {
-    const holder = createSwappableTableRegistry(registryOf(["a"]))
-    holder.replace(registryOf(["c"]))
+    holder.replace(registryOf([]))
+    expect(holder.get("a")).toBeNull()
+    expect(holder.list()).toEqual([])
+
+    holder.replace(registryOf(["b", "c"]))
     expect(holder.get("a")).toBeNull()
     expect(holder.get("c")?.table).toBe("c")
-    expect(holder.list().map((entry) => entry.alias)).toEqual(["c"])
-  })
-
-  it("supports unexpose-then-expose sequences across swaps", () => {
-    const holder = createSwappableTableRegistry(registryOf(["a"]))
-    holder.replace(registryOf([]))
-    expect(holder.list()).toEqual([])
-    holder.replace(registryOf(["a", "b"]))
-    expect(holder.list()).toHaveLength(2)
+    expect(holder.list().map((entry) => entry.alias)).toEqual(["b", "c"])
   })
 })
 

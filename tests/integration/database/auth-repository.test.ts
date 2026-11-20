@@ -137,7 +137,7 @@ describe("AuthRepository PostgreSQL adapter", () => {
     })
   })
 
-  it("creates a user and initial session successfully", async () => {
+  it("creates and persists the user and initial session in one registration", async () => {
     const hash = tokenHash("success-token-hash-aaaaaaaa")
     const expiresAt = futureExpiry()
     const passwordHash = "$argon2id$v=19$m=19456,t=2,p=1$saltsaltsalt$hashhash"
@@ -163,22 +163,11 @@ describe("AuthRepository PostgreSQL adapter", () => {
     expect(session.expiresAt.getTime()).toBe(expiresAt.getTime())
     expect(session.createdAt).toBeInstanceOf(Date)
     expect(session.revokedAt).toBeNull()
-  })
-
-  it("persists both user and session after successful registration (atomicity)", async () => {
-    const hash = tokenHash("atomic-ok-token-hash-bbbbbbbb")
-    const { user } = await repo.createUserAndSession({
-      email: "atomic@example.com",
-      passwordHash: "phash-atomic",
-      tokenHash: hash,
-      expiresAt: futureExpiry(),
-    })
-
-    expect(await countUsers(adminDatabaseUrl, "atomic@example.com")).toBe(1)
+    expect(await countUsers(adminDatabaseUrl, user.email)).toBe(1)
     expect(await countSessions(adminDatabaseUrl, user.id)).toBe(1)
   })
 
-  it("translates duplicate email to EMAIL_ALREADY_REGISTERED", async () => {
+  it("maps a duplicate email to a redacted 409 without creating an extra session", async () => {
     const input = {
       email: "dup@example.com",
       passwordHash: "phash-first",
@@ -208,9 +197,18 @@ describe("AuthRepository PostgreSQL adapter", () => {
       caught,
       "phash-second-SECRET",
       "phash-first",
+      input.tokenHash,
       tokenHash("dup-second-token-hash-dddddddd"),
     )
+    const serialized = JSON.stringify(
+      caught,
+      Object.getOwnPropertyNames(caught as object),
+    )
+    expect(serialized).not.toContain("23505")
+    expect(serialized).not.toContain("users_email")
+    expect(serialized).not.toMatch(/duplicate key|unique constraint/i)
     expect(await countUsers(adminDatabaseUrl, "dup@example.com")).toBe(1)
+    expect(await countSessions(adminDatabaseUrl)).toBe(1)
   })
 
   it("handles racing duplicate registration (one success, one EMAIL_ALREADY_REGISTERED)", async () => {
@@ -246,7 +244,7 @@ describe("AuthRepository PostgreSQL adapter", () => {
     expect(await countUsers(adminDatabaseUrl, email)).toBe(1)
   })
 
-  it("rolls back the user when session insert fails (CHECK constraint)", async () => {
+  it("rolls back both user and session when the session insert fails", async () => {
     // Force session inserts to fail so the registration transaction must
     // roll back the user row as well. Constraint is added via admin and
     // removed in finally so other tests stay isolated.
@@ -285,36 +283,6 @@ describe("AuthRepository PostgreSQL adapter", () => {
       status: 500,
     })
     assertSecretsAbsent(caught, "phash-rollback-SECRET", hash, email)
-
-    expect(await countUsers(adminDatabaseUrl, email)).toBe(0)
-    expect(await countSessions(adminDatabaseUrl)).toBe(0)
-  })
-
-  it("leaves no partial session after a rolled-back registration", async () => {
-    await withClient(adminDatabaseUrl, async (client) => {
-      await client.query(
-        `ALTER TABLE microjbase.sessions
-         ADD CONSTRAINT sessions_fail_insert CHECK (false)`,
-      )
-    })
-
-    try {
-      await expect(
-        repo.createUserAndSession({
-          email: "partial@example.com",
-          passwordHash: "phash-partial",
-          tokenHash: tokenHash("partial-token-hash-hhhhhhhh"),
-          expiresAt: futureExpiry(),
-        }),
-      ).rejects.toMatchObject({ code: "INTERNAL_ERROR" })
-    } finally {
-      await withClient(adminDatabaseUrl, async (client) => {
-        await client.query(
-          `ALTER TABLE microjbase.sessions
-           DROP CONSTRAINT IF EXISTS sessions_fail_insert`,
-        )
-      })
-    }
 
     expect(await countUsers(adminDatabaseUrl)).toBe(0)
     expect(await countSessions(adminDatabaseUrl)).toBe(0)
@@ -473,43 +441,6 @@ describe("AuthRepository PostgreSQL adapter", () => {
       code: expect.stringMatching(/^(INTERNAL_ERROR|DATABASE_UNAVAILABLE)$/),
     })
     assertSecretsAbsent(caught)
-  })
-
-  it("never leaks secrets or constraint names on unique violation", async () => {
-    const passwordHash = "super-secret-password-hash-value"
-    const hash = tokenHash("secret-token-hash-ssssssssssss")
-    await repo.createUserAndSession({
-      email: "secret@example.com",
-      passwordHash,
-      tokenHash: hash,
-      expiresAt: futureExpiry(),
-    })
-
-    let caught: unknown
-    try {
-      await repo.createUserAndSession({
-        email: "secret@example.com",
-        passwordHash,
-        tokenHash: tokenHash("secret-token-hash-2-tttttttt"),
-        expiresAt: futureExpiry(),
-      })
-    } catch (error: unknown) {
-      caught = error
-    }
-
-    expect(caught).toMatchObject({
-      code: "EMAIL_ALREADY_REGISTERED",
-      message: "Email already registered",
-      status: 409,
-    })
-    assertSecretsAbsent(caught, passwordHash, hash)
-    const serialized = JSON.stringify(
-      caught,
-      Object.getOwnPropertyNames(caught as object),
-    )
-    expect(serialized).not.toContain("23505")
-    expect(serialized).not.toContain("users_email")
-    expect(serialized).not.toMatch(/duplicate key|unique constraint/i)
   })
 
   it("does not map an unrelated 23505 to EMAIL_ALREADY_REGISTERED", async () => {

@@ -3,6 +3,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
+import { AppError } from "../../../src/core/index.js"
 import {
   assertSchemaAdminSessionDistinct,
   checkSchemaAdminRoleSafety,
@@ -134,10 +135,18 @@ describe("checkSchemaAdminRoleSafety with real PostgreSQL roles", () => {
     }
   })
 
-  it("rejects a BYPASSRLS role before any operation executes", async () => {
-    await expect(checkRole(BYPASS_ROLE, "bypass_password")).rejects.toThrow(
+  it("rejects a BYPASSRLS role with a redacted public envelope before executing", async () => {
+    const result = checkRole(BYPASS_ROLE, "bypass_password")
+    await expect(result).rejects.toThrow(
       "Schema-admin database role must not have BYPASSRLS",
     )
+    const error: unknown = await result.catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(AppError)
+    expect((error as AppError).toJSON()).toEqual({
+      code: "DATABASE_UNAVAILABLE",
+      message: "Schema-admin database role must not have BYPASSRLS",
+      status: 503,
+    })
   })
 
   it("rejects a role with role-management rights", async () => {
@@ -158,21 +167,6 @@ describe("checkSchemaAdminRoleSafety with real PostgreSQL roles", () => {
     await expect(checkRole(READ_ALL_ROLE, "read_all_password")).rejects.toThrow(
       "Schema-admin database role must not be a member of pg_read_all_data",
     )
-  })
-
-  it("rejection envelopes carry no database internals", async () => {
-    await checkRole(BYPASS_ROLE, "bypass_password").catch((error: unknown) => {
-      const envelope = (
-        error as { toJSON: () => Record<string, unknown> }
-      ).toJSON()
-      expect(envelope).toEqual({
-        code: "DATABASE_UNAVAILABLE",
-        message: "Schema-admin database role must not have BYPASSRLS",
-        status: 503,
-      })
-      expect(JSON.stringify(envelope)).not.toContain("rolbypassrls")
-      expect(JSON.stringify(envelope)).not.toContain("true")
-    })
   })
 })
 

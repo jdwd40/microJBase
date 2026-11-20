@@ -1,7 +1,8 @@
 // Unit tests for the V02-04 schema-admin capability boundary.
 
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
+import * as pools from "../../../src/database/pool.js"
 import {
   SCHEMA_ADMIN_MAX_CONNECTIONS,
   assertSchemaAdminSessionDistinct,
@@ -256,13 +257,20 @@ describe("checkSchemaMigrationsReadAccess", () => {
 })
 
 describe("createSchemaAdminPool", () => {
-  it("creates a bounded pool over the schema-admin URL", () => {
-    const pool = createSchemaAdminPool({
-      databaseUrl: "postgres://schema:secret@127.0.0.1:5432/db",
-    })
-    expect(typeof pool.query).toBe("function")
-    expect(typeof pool.connect).toBe("function")
-    expect(typeof pool.close).toBe("function")
-    expect(SCHEMA_ADMIN_MAX_CONNECTIONS).toBeLessThanOrEqual(10)
+  it("supplies the operator URL and the admin connection ceiling to the pool", async () => {
+    const create = vi.spyOn(pools, "createPool")
+    const databaseUrl = "postgres://schema:secret@127.0.0.1:5432/db"
+    try {
+      await using pool = createSchemaAdminPool({ databaseUrl })
+      expect(pool).toBe(create.mock.results[0]?.value)
+      expect(create).toHaveBeenCalledExactlyOnceWith({
+        databaseUrl,
+        maxConnections: SCHEMA_ADMIN_MAX_CONNECTIONS,
+      })
+      expect(SCHEMA_ADMIN_MAX_CONNECTIONS).toBeGreaterThan(0)
+      expect(SCHEMA_ADMIN_MAX_CONNECTIONS).toBeLessThanOrEqual(10)
+    } finally {
+      create.mockRestore()
+    }
   })
 })

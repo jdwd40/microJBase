@@ -14,7 +14,7 @@
 //          confirmations, and the exposed-table mutation guard — with no SQL
 //          or internal detail ever crossing the public envelope.
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
 
 import { E2E_ADMIN_TOKEN, adminTokenDigestHex } from "./helpers/config.js"
 import { adminQuery } from "./helpers/database.js"
@@ -39,6 +39,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await stopE2EFile(context)
+  const logs = context.server.output()
+  expect(logs).not.toContain(OP)
+  expect(logs).not.toContain(adminTokenDigestHex())
 })
 
 function adminHeaders(idempotencyKey?: string): Record<string, string> {
@@ -62,23 +65,6 @@ async function adminMutate(
   idempotencyKey: string,
 ): Promise<ApiResponse> {
   return context.api.postWithHeaders(path, body, adminHeaders(idempotencyKey))
-}
-
-function expectMutationOk(response: ApiResponse): void {
-  if (response.status !== 200) {
-    throw new Error(
-      `expected 200, got ${response.status}: ${JSON.stringify(response.body)}`,
-    )
-  }
-  const body = response.body as {
-    data: { dry_run: boolean; replayed: boolean; record: unknown }
-  }
-  if (body.data.dry_run !== false || body.data.replayed !== false) {
-    throw new Error(`expected fresh success: ${response.text}`)
-  }
-  if (body.data.record === null) {
-    throw new Error(`expected a durable record: ${response.text}`)
-  }
 }
 
 function expectNoSqlLeakage(response: ApiResponse): void {
@@ -279,16 +265,71 @@ describe("read-only admin endpoints (V02-17)", () => {
 
 describe("typed mutation matrix (V02-18)", () => {
   const run = nonce()
-  const table = `b6_${run}`
-  const child = `b6_child_${run}`
   const alias = `b6x_${run}`
   // Dedicated operator schema owned by the schema-admin role (provisioning).
   const schema = "e2e_admin"
   let keyCounter = 0
   const nextKey = (): string => `b6-${run}-${(keyCounter += 1)}`
 
-  it("creates a table and records it durably", async () => {
-    const response = await adminMutate(
+  // Each scenario owns its tables and checks the durable records it produced.
+  const expectedHistory = new Map<string, string>()
+
+  function expectMutationOk(response: ApiResponse, commandType: string): void {
+    expect(response.status, response.text).toBe(200)
+    const data = (
+      response.body as {
+        data: {
+          dry_run: boolean
+          replayed: boolean
+          record: { idempotency_key: string; command_type: string }
+        }
+      }
+    ).data
+    expect(data).toMatchObject({
+      dry_run: false,
+      replayed: false,
+      record: {
+        command_type: commandType,
+        idempotency_key: expect.any(String),
+      },
+    })
+    expectedHistory.set(data.record.idempotency_key, commandType)
+  }
+
+  afterEach(async () => {
+    const entries = [...expectedHistory]
+    expectedHistory.clear()
+    if (!entries.length) return
+    const history = await adminGet("/v1/admin/schema/history?limit=100")
+    expect(history.status, history.text).toBe(200)
+    const records = (history.body as { data: Record<string, unknown>[] }).data
+    for (const [idempotencyKey, commandType] of entries) {
+      const recorded = records.find(
+        (record) => record.idempotency_key === idempotencyKey,
+      )
+      expect(recorded, idempotencyKey).toMatchObject({
+        command_type: commandType,
+        status: "succeeded",
+      })
+    }
+    // Newest first, all terminal, safe actor fingerprints only.
+    const timestamps = records.map((record) =>
+      Date.parse(record.created_at as string),
+    )
+    for (let index = 1; index < timestamps.length; index += 1) {
+      const previous = timestamps[index - 1] as number
+      const current = timestamps[index] as number
+      expect(previous).toBeGreaterThanOrEqual(current)
+    }
+    for (const record of records) {
+      expect(["succeeded", "failed"]).toContain(record.status)
+      expect(record.actor_fingerprint).toBeTruthy()
+      expect(record.actor_fingerprint).not.toBe("http-operator")
+    }
+  })
+
+  function createTable(table: string, withMemo = false): Promise<ApiResponse> {
+    return adminMutate(
       "/v1/admin/schema/tables",
       {
         schema,
@@ -312,11 +353,61 @@ describe("typed mutation matrix (V02-18)", () => {
             nullable: true,
             default: { kind: "none" },
           },
+          ...(withMemo
+            ? [
+                {
+                  name: "memo",
+                  type: "text",
+                  nullable: true,
+                  default: { kind: "none" },
+                },
+              ]
+            : []),
         ],
       },
       nextKey(),
     )
-    expectMutationOk(response)
+  }
+
+  async function fixtureTable(
+    label: string,
+    withMemo = false,
+  ): Promise<string> {
+    const table = `b6_${label}_${run}`
+    expectMutationOk(await createTable(table, withMemo), "schema.table.create")
+    return table
+  }
+
+  async function tableExists(table: string): Promise<boolean> {
+    const result = await adminQuery<{ present: boolean }>(
+      "SELECT EXISTS (SELECT FROM pg_catalog.pg_tables WHERE schemaname = $1 AND tablename = $2) AS present",
+      [schema, table],
+    )
+    return result.rows[0]!.present
+  }
+
+  async function enableOwnership(table: string): Promise<void> {
+    const enableRls = await adminMutate(
+      `/v1/admin/schema/rls/enable`,
+      { schema, table },
+      nextKey(),
+    )
+    expectMutationOk(enableRls, "schema.rls.enable")
+
+    for (const template of ["read", "insert", "update", "delete"] as const) {
+      const policy = await adminMutate(
+        `/v1/admin/schema/policies`,
+        { schema, table, column: "owner_id", template },
+        nextKey(),
+      )
+      expectMutationOk(policy, "schema.policy.create")
+    }
+  }
+
+  it("creates a table and records it durably", async () => {
+    const table = `b6_created_${run}`
+    const response = await createTable(table)
+    expectMutationOk(response, "schema.table.create")
 
     // Deterministic shape: envelope + snake_case record.
     const record = (
@@ -345,13 +436,14 @@ describe("typed mutation matrix (V02-18)", () => {
   })
 
   it("replays the same idempotency key and conflicts on a different command", async () => {
+    const table = await fixtureTable("replay")
     const key = nextKey()
     const first = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/rename`,
       { new_name: `${table}_renamed` },
       key,
     )
-    expectMutationOk(first)
+    expectMutationOk(first, "schema.table.rename")
 
     const replay = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/rename`,
@@ -363,13 +455,13 @@ describe("typed mutation matrix (V02-18)", () => {
       .replayed
     expect(replayed).toBe(true)
 
-    // Rename it back so later tests keep the original name.
+    // Restore the original name before attempting to reuse the key.
     const back = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}_renamed/rename`,
       { new_name: table },
       nextKey(),
     )
-    expectMutationOk(back)
+    expectMutationOk(back, "schema.table.rename")
 
     const conflict = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/rename`,
@@ -381,6 +473,7 @@ describe("typed mutation matrix (V02-18)", () => {
   })
 
   it("enforces idempotency keys and strict bodies on mutations", async () => {
+    const table = await fixtureTable("validation")
     const noKey = await context.api.postWithHeaders(
       "/v1/admin/schema/tables",
       {
@@ -479,9 +572,11 @@ describe("typed mutation matrix (V02-18)", () => {
     const history = await adminGet("/v1/admin/schema/history?limit=50")
     const json = JSON.stringify(history.body)
     expect(json).not.toContain(ghost)
+    expect(await tableExists(ghost)).toBe(false)
   })
 
   it("manages columns: add, rename, defaults, nullability, frozen type matrix", async () => {
+    const table = await fixtureTable("columns")
     const add = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/columns`,
       {
@@ -494,42 +589,42 @@ describe("typed mutation matrix (V02-18)", () => {
       },
       nextKey(),
     )
-    expectMutationOk(add)
+    expectMutationOk(add, "schema.column.add")
 
     const rename = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/columns/note/rename`,
       { new_name: "memo" },
       nextKey(),
     )
-    expectMutationOk(rename)
+    expectMutationOk(rename, "schema.column.rename")
 
     const setDefault = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/columns/memo/default`,
       { default: { kind: "literal", value: "n/a" } },
       nextKey(),
     )
-    expectMutationOk(setDefault)
+    expectMutationOk(setDefault, "schema.column.default.set")
 
     const dropDefault = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/columns/memo/default/drop`,
       {},
       nextKey(),
     )
-    expectMutationOk(dropDefault)
+    expectMutationOk(dropDefault, "schema.column.default.drop")
 
     const setNotNull = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/columns/qty/not-null`,
       {},
       nextKey(),
     )
-    expectMutationOk(setNotNull)
+    expectMutationOk(setNotNull, "schema.column.not_null.set")
 
     const dropNotNull = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/columns/qty/nullable`,
       {},
       nextKey(),
     )
-    expectMutationOk(dropNotNull)
+    expectMutationOk(dropNotNull, "schema.column.not_null.drop")
 
     // Matrix-approved widening succeeds...
     const widen = await adminMutate(
@@ -537,7 +632,7 @@ describe("typed mutation matrix (V02-18)", () => {
       { to_type: "bigint" },
       nextKey(),
     )
-    expectMutationOk(widen)
+    expectMutationOk(widen, "schema.column.type.change")
 
     // ...and anything outside the frozen matrix refuses safely.
     const unsupported = await adminMutate(
@@ -559,13 +654,14 @@ describe("typed mutation matrix (V02-18)", () => {
   })
 
   it("manages indexes and unique constraints with explicit names", async () => {
+    const table = await fixtureTable("indexes", true)
     const indexName = `b6_idx_${run}`
     const create = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/indexes`,
       { columns: ["memo"], name: indexName },
       nextKey(),
     )
-    expectMutationOk(create)
+    expectMutationOk(create, "schema.index.create")
 
     const uniqueName = `b6_uq_${run}`
     const unique = await adminMutate(
@@ -573,24 +669,26 @@ describe("typed mutation matrix (V02-18)", () => {
       { columns: ["memo"], name: uniqueName },
       nextKey(),
     )
-    expectMutationOk(unique)
+    expectMutationOk(unique, "schema.constraint.unique.add")
 
     const dropUnique = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/constraints/${uniqueName}/drop`,
       {},
       nextKey(),
     )
-    expectMutationOk(dropUnique)
+    expectMutationOk(dropUnique, "schema.constraint.drop")
 
     const dropIndex = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/indexes/${indexName}/drop`,
       {},
       nextKey(),
     )
-    expectMutationOk(dropIndex)
+    expectMutationOk(dropIndex, "schema.index.drop")
   })
 
   it("manages foreign keys on the frozen action allowlist", async () => {
+    const table = await fixtureTable("parent")
+    const child = `b6_child_${run}`
     const createChild = await adminMutate(
       "/v1/admin/schema/tables",
       {
@@ -607,7 +705,7 @@ describe("typed mutation matrix (V02-18)", () => {
       },
       nextKey(),
     )
-    expectMutationOk(createChild)
+    expectMutationOk(createChild, "schema.table.create")
 
     const fkName = `b6_fk_${run}`
     const addFk = await adminMutate(
@@ -621,7 +719,7 @@ describe("typed mutation matrix (V02-18)", () => {
       },
       nextKey(),
     )
-    expectMutationOk(addFk)
+    expectMutationOk(addFk, "schema.foreign_key.add")
 
     // set_default is not representable anywhere in the command surface.
     const badAction = await adminMutate(
@@ -651,34 +749,29 @@ describe("typed mutation matrix (V02-18)", () => {
       {},
       nextKey(),
     )
-    expectMutationOk(dropFk)
+    expectMutationOk(dropFk, "schema.constraint.drop")
+
+    const dropChild = await adminMutate(
+      `/v1/admin/schema/tables/${schema}/${child}/drop`,
+      { confirm: `${schema}.${child}` },
+      nextKey(),
+    )
+    expectMutationOk(dropChild, "schema.table.drop")
+    expect(await tableExists(child)).toBe(false)
   })
 
   it("refuses structural mutations on exposed tables through the safe envelope", async () => {
+    const table = await fixtureTable("exposure")
     // Enable + force RLS and install the four ownership policies, then
     // expose the table and watch the 9C003 guard refuse a structural change.
-    const enableRls = await adminMutate(
-      `/v1/admin/schema/rls/enable`,
-      { schema, table },
-      nextKey(),
-    )
-    expectMutationOk(enableRls)
-
-    for (const template of ["read", "insert", "update", "delete"] as const) {
-      const policy = await adminMutate(
-        `/v1/admin/schema/policies`,
-        { schema, table, column: "owner_id", template },
-        nextKey(),
-      )
-      expectMutationOk(policy)
-    }
+    await enableOwnership(table)
 
     const expose = await adminMutate(
       `/v1/admin/schema/exposure`,
       { schema, table, alias },
       nextKey(),
     )
-    expectMutationOk(expose)
+    expectMutationOk(expose, "schema.exposure.expose")
 
     // The data API now serves the alias.
     const user = await registerUser(context.api, `b6-owner-${run}@example.com`)
@@ -721,7 +814,7 @@ describe("typed mutation matrix (V02-18)", () => {
       { schema, table },
       nextKey(),
     )
-    expectMutationOk(unexpose)
+    expectMutationOk(unexpose, "schema.exposure.unexpose")
     const gone = await context.api.get(`/v1/data/${alias}`, user.token)
     expectError(gone, 404, "TABLE_NOT_FOUND")
     const stillThere = await adminGet(
@@ -734,19 +827,21 @@ describe("typed mutation matrix (V02-18)", () => {
   })
 
   it("removes ownership policies and disables RLS only with confirmation", async () => {
+    const table = await fixtureTable("policies")
+    await enableOwnership(table)
     const remove = await adminMutate(
       `/v1/admin/schema/policies/remove`,
       { schema, table, column: "owner_id", template: "delete" },
       nextKey(),
     )
-    expectMutationOk(remove)
+    expectMutationOk(remove, "schema.policy.remove")
 
     const recreate = await adminMutate(
       `/v1/admin/schema/policies`,
       { schema, table, column: "owner_id", template: "delete" },
       nextKey(),
     )
-    expectMutationOk(recreate)
+    expectMutationOk(recreate, "schema.policy.create")
 
     const wrongConfirm = await adminMutate(
       `/v1/admin/schema/rls/disable`,
@@ -761,7 +856,7 @@ describe("typed mutation matrix (V02-18)", () => {
       { schema, table, confirm: `${schema}.${table}` },
       nextKey(),
     )
-    expectMutationOk(disable)
+    expectMutationOk(disable, "schema.rls.disable")
 
     const detail = await adminGet(`/v1/admin/schema/tables/${schema}/${table}`)
     const data = (detail.body as { data: Record<string, unknown> }).data
@@ -770,6 +865,7 @@ describe("typed mutation matrix (V02-18)", () => {
   })
 
   it("drops columns and tables only with exact confirmations", async () => {
+    const table = await fixtureTable("drop", true)
     const wrongConfirm = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/columns/memo/drop`,
       { confirm: `${schema}.wrong.memo` },
@@ -782,76 +878,18 @@ describe("typed mutation matrix (V02-18)", () => {
       { confirm: `${schema}.${table}.memo` },
       nextKey(),
     )
-    expectMutationOk(dropColumn)
-
-    // Drop the child first (it still references the parent), then the table.
-    const dropChild = await adminMutate(
-      `/v1/admin/schema/tables/${schema}/${child}/drop`,
-      { confirm: `${schema}.${child}` },
-      nextKey(),
-    )
-    expectMutationOk(dropChild)
+    expectMutationOk(dropColumn, "schema.column.drop")
 
     const dropTable = await adminMutate(
       `/v1/admin/schema/tables/${schema}/${table}/drop`,
       { confirm: `${schema}.${table}` },
       nextKey(),
     )
-    expectMutationOk(dropTable)
+    expectMutationOk(dropTable, "schema.table.drop")
+    expect(await tableExists(table)).toBe(false)
 
     const detail = await adminGet(`/v1/admin/schema/tables/${schema}/${table}`)
     expectError(detail, 404, "TABLE_NOT_FOUND")
-  })
-
-  it("records the full matrix in durable history with terminal statuses", async () => {
-    const history = await adminGet("/v1/admin/schema/history?limit=100")
-    if (history.status !== 200) {
-      throw new Error(`history failed: ${history.status} ${history.text}`)
-    }
-    const records = (history.body as { data: Record<string, unknown>[] }).data
-    const commandTypes = records.map((record) => record.command_type)
-
-    for (const expected of [
-      "schema.table.create",
-      "schema.table.rename",
-      "schema.column.add",
-      "schema.column.rename",
-      "schema.column.default.set",
-      "schema.column.default.drop",
-      "schema.column.not_null.set",
-      "schema.column.not_null.drop",
-      "schema.column.type.change",
-      "schema.index.create",
-      "schema.index.drop",
-      "schema.constraint.unique.add",
-      "schema.constraint.drop",
-      "schema.foreign_key.add",
-      "schema.rls.enable",
-      "schema.policy.create",
-      "schema.exposure.expose",
-      "schema.exposure.unexpose",
-      "schema.policy.remove",
-      "schema.rls.disable",
-      "schema.column.drop",
-      "schema.table.drop",
-    ]) {
-      expect(commandTypes).toContain(expected)
-    }
-
-    // Newest first, all terminal, safe actor fingerprints only.
-    const timestamps = records.map((record) =>
-      Date.parse(record.created_at as string),
-    )
-    for (let index = 1; index < timestamps.length; index += 1) {
-      const previous = timestamps[index - 1] as number
-      const current = timestamps[index] as number
-      expect(previous).toBeGreaterThanOrEqual(current)
-    }
-    for (const record of records) {
-      expect(["succeeded", "failed"]).toContain(record.status)
-      expect(record.actor_fingerprint).toBeTruthy()
-      expect(record.actor_fingerprint).not.toBe("http-operator")
-    }
   })
 
   it("never leaks SQL or internals in any admin error body", async () => {
@@ -881,23 +919,9 @@ describe("typed mutation matrix (V02-18)", () => {
       ),
     ]
     for (const response of responses) {
-      if (response.status >= 500) {
-        throw new Error(`unexpected 5xx: ${response.status} ${response.text}`)
-      }
+      expect(response.status, response.text).toBeGreaterThanOrEqual(400)
+      expect(response.status, response.text).toBeLessThan(500)
       expectNoSqlLeakage(response)
     }
-  })
-
-  it("keeps the operator token out of server logs across the whole matrix", async () => {
-    expect(context.server.output()).not.toContain(OP)
-    expect(context.server.output()).not.toContain(adminTokenDigestHex())
-  })
-
-  it("verifies out-of-band that dry-run left no table and drops reached the database", async () => {
-    const ghosts = await adminQuery(
-      `SELECT count(*)::int AS count FROM pg_tables
-        WHERE schemaname = 'public' AND tablename LIKE 'b6\\_dry\\_${run}'`,
-    )
-    expect(ghosts.rows[0]?.count ?? null).toBe(0)
   })
 })

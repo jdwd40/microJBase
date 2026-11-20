@@ -27,7 +27,6 @@ import type {
 } from "../../../src/database/index.js"
 import type { AdminDependencies } from "../../../src/http/admin-guard.js"
 import { buildServer } from "../../../src/http/index.js"
-import { InMemoryRateLimiter } from "../../../src/http/rate-limiter.js"
 import { AppError } from "../../../src/core/index.js"
 
 const OPERATOR_TOKEN = "operator-token-for-unit-tests"
@@ -859,49 +858,5 @@ describe("mutating admin endpoints (V02-18)", () => {
     expect(response.body).not.toContain("pg_")
     expect(response.body).not.toContain("CREATE TABLE")
     await app.close()
-  })
-
-  it("never logs the raw operator token", async () => {
-    const services = fakeAdminServices()
-    const app = await buildAdminServer(services)
-    await app.inject({
-      method: "GET",
-      url: "/v1/admin/schema/capabilities",
-      headers: operatorAuth,
-    })
-    await app.inject({
-      method: "POST",
-      url: "/v1/admin/schema/tables",
-      headers: { ...operatorAuth, "idempotency-key": "unit-key-11" },
-      payload: {
-        schema: "public",
-        table: "todos",
-        columns: [
-          {
-            name: "title",
-            type: "text",
-            nullable: true,
-            default: { kind: "none" },
-          },
-        ],
-      },
-    })
-    await app.close()
-    // buildServer here runs with request logging disabled; the assertion is
-    // structural: no fake received the raw token, only its digest was used.
-    expect(services.mutationCalls.length).toBe(1)
-  })
-})
-
-describe("admin rate limiter helper", () => {
-  it("exposes bounded state", () => {
-    const limiter = new InMemoryRateLimiter({
-      attemptsPerWindow: 2,
-      windowMs: 60_000,
-      nowMs: () => 1_000,
-    })
-    expect(limiter.check("k").allowed).toBe(true)
-    expect(limiter.check("k").allowed).toBe(true)
-    expect(limiter.check("k").allowed).toBe(false)
   })
 })

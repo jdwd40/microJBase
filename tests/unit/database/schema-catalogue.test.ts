@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
 import type pg from "pg"
 
 import { AppError } from "../../../src/core/index.js"
@@ -13,17 +13,6 @@ import {
 
 function pgResult(rows: unknown[]): pg.QueryResult {
   return { rows, command: "SELECT", rowCount: rows.length, oid: 0, fields: [] }
-}
-
-function createMockQuery(
-  rows: unknown[],
-): SchemaCatalogueDependencies["query"] {
-  return (async (text: string) => {
-    if (text !== SCHEMA_CATALOGUE_SQL) {
-      throw new Error(`Unexpected SQL: ${text}`)
-    }
-    return pgResult(rows)
-  }) as SchemaCatalogueDependencies["query"]
 }
 
 function baseRow(): SchemaCatalogueRow {
@@ -160,14 +149,15 @@ const FORBIDDEN_TOKENS =
   /\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|MERGE|CALL)\b/i
 
 describe("schema catalogue query shape", () => {
-  it("executes exactly one fixed read-only SELECT statement with no parameters", async () => {
+  it("reads the mapped schema with exactly one fixed parameterless SELECT", async () => {
     const calls: { text: string; values: unknown }[] = []
     const query = (async (text: string, values?: unknown[]) => {
       calls.push({ text, values })
-      return pgResult([])
+      return pgResult([schemaRow()])
     }) as SchemaCatalogueDependencies["query"]
 
-    await readSchemaCatalogue(query)
+    const result = await createSchemaCatalogueReader({ query }).read()
+    expect(result.schemas.map((schema) => schema.name)).toEqual(["app"])
 
     expect(calls).toHaveLength(1)
     expect(calls[0]?.text).toBe(SCHEMA_CATALOGUE_SQL)
@@ -224,17 +214,6 @@ describe("schema catalogue query shape", () => {
     expect(SCHEMA_CATALOGUE_SQL).toContain(
       "con.contype IN ('p', 'u', 'f', 'c', 'x')",
     )
-  })
-
-  it("reader port issues exactly one query per read", async () => {
-    const query = vi.fn(createMockQuery([schemaRow()]))
-    const typedQuery = query as unknown as SchemaCatalogueDependencies["query"]
-    const reader = createSchemaCatalogueReader({ query: typedQuery })
-
-    const catalogue = await reader.read()
-
-    expect(query).toHaveBeenCalledTimes(1)
-    expect(catalogue.schemas.map((schema) => schema.name)).toEqual(["app"])
   })
 })
 

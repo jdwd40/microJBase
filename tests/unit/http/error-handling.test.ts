@@ -1,331 +1,87 @@
-import { randomUUID } from "node:crypto"
-
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import type { FastifyInstance } from "fastify"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { createAuthService } from "../../../src/auth/index.js"
-import { createDataService } from "../../../src/data/index.js"
-import { buildServer } from "../../../src/http/index.js"
-import type {
-  AuthRepository,
-  AuthenticatedUser,
-  DataRepository,
-  ExposedTable,
-  Session,
-  TableRegistry,
-  User,
-  UserId,
-  UserRecord,
-} from "../../../src/contracts/index.js"
 import type { Pool } from "../../../src/database/index.js"
+import { buildServer } from "../../../src/http/index.js"
+import { serviceSpies } from "./service-spies.js"
 
-const TEST_TABLE: ExposedTable = {
-  alias: "items",
-  schema: "public",
-  table: "items",
-  primaryKey: "id",
-  readableColumns: ["id", "name"],
-  insertableColumns: ["id", "name"],
-  updatableColumns: ["name"],
-}
-
-class FakeAuthRepository implements AuthRepository {
-  users = new Map<string, UserRecord>()
-  sessions = new Map<string, Session>()
-
-  async createUserAndSession(input: {
-    email: string
-    passwordHash: string
-    tokenHash: Buffer
-    expiresAt: Date
-  }): Promise<{ user: User; session: Session }> {
-    const user: UserRecord = {
-      id: randomUUID(),
-      email: input.email,
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      passwordHash: input.passwordHash,
-    }
-    const session: Session = {
-      id: randomUUID(),
-      userId: user.id,
-      tokenHash: Buffer.from(input.tokenHash),
-      expiresAt: input.expiresAt,
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      revokedAt: null,
-    }
-    this.users.set(user.email, user)
-    this.sessions.set(session.tokenHash.toString("hex"), session)
-    return {
-      user: { id: user.id, email: user.email, createdAt: user.createdAt },
-      session,
-    }
-  }
-
-  async findByEmail(email: string): Promise<UserRecord | null> {
-    return this.users.get(email) ?? null
-  }
-
-  async createSession(input: {
-    userId: UserId
-    tokenHash: Buffer
-    expiresAt: Date
-  }): Promise<Session> {
-    const session: Session = {
-      id: randomUUID(),
-      userId: input.userId,
-      tokenHash: Buffer.from(input.tokenHash),
-      expiresAt: input.expiresAt,
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      revokedAt: null,
-    }
-    this.sessions.set(session.tokenHash.toString("hex"), session)
-    return session
-  }
-
-  async findActiveUserByTokenHash(
-    tokenHash: Buffer,
-    now: Date,
-  ): Promise<AuthenticatedUser | null> {
-    void tokenHash
-    void now
-    return null
-  }
-
-  async revokeByTokenHash(
-    tokenHash: Buffer,
-    revokedAt: Date,
-  ): Promise<boolean> {
-    void tokenHash
-    void revokedAt
-    return false
-  }
-}
-
-class FakeTableRegistry implements TableRegistry {
-  get(alias: string): ExposedTable | null {
-    if (alias === TEST_TABLE.alias) return TEST_TABLE
-    return null
-  }
-
-  list(): readonly ExposedTable[] {
-    return [TEST_TABLE]
-  }
-}
-
-class FakeDataRepository implements DataRepository {
-  async list() {
-    return { items: [], limit: 50, offset: 0 }
-  }
-
-  async findById() {
-    return null
-  }
-
-  async create() {
-    return {}
-  }
-
-  async updateById() {
-    return null
-  }
-
-  async deleteById() {
-    return false
-  }
-}
-
-class FailingPool implements Pool {
-  async query(): Promise<never> {
-    const error = new Error("connect ECONNREFUSED 127.0.0.1:5432")
-    ;(error as unknown as Record<string, unknown>)["code"] = "ECONNREFUSED"
-    throw error
-  }
-
-  async connect(): Promise<never> {
-    const error = new Error("connect ECONNREFUSED 127.0.0.1:5432")
-    ;(error as unknown as Record<string, unknown>)["code"] = "ECONNREFUSED"
-    throw error
-  }
-
-  async close(): Promise<void> {
-    return undefined
-  }
-
-  async [Symbol.asyncDispose](): Promise<void> {
-    await this.close()
-  }
-}
-
-/** A pool whose query fails with a non-database error (e.g. a bug). */
-class InternalErrorPool implements Pool {
-  async query(): Promise<never> {
-    throw new Error("unexpected non-database failure")
-  }
-
-  async connect(): Promise<never> {
-    throw new Error("unexpected non-database failure")
-  }
-
-  async close(): Promise<void> {
-    return undefined
-  }
-
-  async [Symbol.asyncDispose](): Promise<void> {
-    await this.close()
-  }
-}
-
-describe("error handling", () => {
+describe("HTTP error handling", () => {
   let app: FastifyInstance
-
+  const query = vi.fn<() => Promise<never>>()
   beforeEach(async () => {
-    const authService = createAuthService(new FakeAuthRepository(), {
-      sessionTtlSeconds: 3600,
-      now: () => new Date("2026-01-01T00:00:00.000Z"),
-    })
-    const dataService = createDataService(
-      new FakeTableRegistry(),
-      new FakeDataRepository(),
-    )
+    query.mockReset()
+    const pool: Pool = {
+      query,
+      connect: vi.fn<Pool["connect"]>(),
+      close: async () => {},
+      [Symbol.asyncDispose]: async () => {},
+    }
     app = await buildServer(
-      { authService, dataService },
+      { ...serviceSpies(), pool },
       { disableRequestLogging: true },
     )
   })
-
   afterEach(async () => {
     await app.close()
   })
 
-  it("returns 503 when health pool query fails", async () => {
-    const failingAuthRepository = new FakeAuthRepository()
-    const failingDataRepository = new FakeDataRepository()
-    const healthApp = await buildServer(
-      {
-        authService: createAuthService(failingAuthRepository, {
-          sessionTtlSeconds: 3600,
-          now: () => new Date("2026-01-01T00:00:00.000Z"),
-        }),
-        dataService: createDataService(
-          new FakeTableRegistry(),
-          failingDataRepository,
-        ),
-        pool: new FailingPool(),
-      },
-      { disableRequestLogging: true },
-    )
-
-    try {
-      const response = await healthApp.inject({
-        method: "GET",
-        url: "/health",
-      })
-      expect(response.statusCode).toBe(503)
-      expect(response.json().error.code).toBe("DATABASE_UNAVAILABLE")
-    } finally {
-      await healthApp.close()
-    }
-  })
-
-  it("returns 500 INTERNAL_ERROR when the health query fails unexpectedly", async () => {
-    const healthApp = await buildServer(
-      {
-        authService: createAuthService(new FakeAuthRepository(), {
-          sessionTtlSeconds: 3600,
-          now: () => new Date("2026-01-01T00:00:00.000Z"),
-        }),
-        dataService: createDataService(
-          new FakeTableRegistry(),
-          new FakeDataRepository(),
-        ),
-        pool: new InternalErrorPool(),
-      },
-      { disableRequestLogging: true },
-    )
-
-    try {
-      const response = await healthApp.inject({
-        method: "GET",
-        url: "/health",
-      })
-      expect(response.statusCode).toBe(500)
-      expect(response.json().error.code).toBe("INTERNAL_ERROR")
-      // No raw error detail may leak into the envelope.
-      expect(JSON.stringify(response.json())).not.toContain(
-        "unexpected non-database failure",
-      )
-    } finally {
-      await healthApp.close()
-    }
-  })
-
-  it("returns 400 for malformed JSON", async () => {
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/auth/login",
-      headers: { "content-type": "application/json" },
-      payload: "{not json",
-    })
-    expect(response.statusCode).toBe(400)
-    expect(response.json().error.code).toBe("VALIDATION_ERROR")
-  })
-
-  it("returns 413 for oversized body", async () => {
-    const huge = "x".repeat(2_000_000)
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/auth/login",
-      headers: { "content-type": "application/json" },
-      payload: JSON.stringify({
-        email: `${huge}@example.com`,
-        password: huge,
+  it.each([
+    [
+      "connection refused",
+      Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), {
+        code: "ECONNREFUSED",
       }),
-    })
-    expect(response.statusCode).toBe(413)
-    expect(response.json().error.code).toBe("VALIDATION_ERROR")
-  })
+      503,
+      "DATABASE_UNAVAILABLE",
+    ],
+    [
+      "unexpected failure",
+      new Error("unexpected non-database failure"),
+      500,
+      "INTERNAL_ERROR",
+    ],
+  ] as const)(
+    "health translates %s and redacts the underlying error",
+    async (_label, failure, status, code) => {
+      query.mockRejectedValue(failure)
+      const response = await app.inject({ method: "GET", url: "/health" })
+      expect(query).toHaveBeenCalledOnce()
+      expect(response.statusCode).toBe(status)
+      expect(response.json()).toMatchObject({ data: null, error: { code } })
+      expect(response.body).not.toContain(failure.message)
+    },
+  )
 
-  it("returns 400 with no-store for malformed JSON on an auth route (pre-route failure)", async () => {
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/auth/login",
-      headers: { "content-type": "application/json" },
-      payload: "{not json",
-    })
-    expect(response.statusCode).toBe(400)
-    expect(response.json().error.code).toBe("VALIDATION_ERROR")
-    expect(response.headers["cache-control"]).toBe("no-store")
-  })
-
-  it("returns 413 with no-store for an oversized auth body (pre-route failure)", async () => {
-    const huge = "x".repeat(2_000_000)
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/auth/login",
-      headers: { "content-type": "application/json" },
-      payload: JSON.stringify({
-        email: `${huge}@example.com`,
-        password: huge,
+  it.each([
+    ["malformed JSON", "{not json", 400],
+    ["empty JSON", "", 400],
+    [
+      "oversized JSON",
+      JSON.stringify({
+        email: "a@example.com",
+        password: "x".repeat(2_000_000),
       }),
-    })
-    expect(response.statusCode).toBe(413)
-    expect(response.json().error.code).toBe("VALIDATION_ERROR")
-    expect(response.headers["cache-control"]).toBe("no-store")
-  })
+      413,
+    ],
+  ] as const)(
+    "rejects %s on login with a no-store validation response",
+    async (_case, payload, status) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/auth/login",
+        headers: { "content-type": "application/json" },
+        payload,
+      })
+      expect(response.statusCode).toBe(status)
+      expect(response.json()).toMatchObject({
+        data: null,
+        error: { code: "VALIDATION_ERROR" },
+      })
+      expect(response.headers["cache-control"]).toBe("no-store")
+    },
+  )
 
-  it("returns 400 with no-store for an empty JSON body on an auth route (pre-route failure)", async () => {
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/auth/login",
-      headers: { "content-type": "application/json" },
-      payload: "",
-    })
-    expect(response.statusCode).toBe(400)
-    expect(response.json().error.code).toBe("VALIDATION_ERROR")
-    expect(response.headers["cache-control"]).toBe("no-store")
-  })
-
-  it("returns 500 INTERNAL_ERROR for unmapped Fastify errors such as 415", async () => {
+  it("sanitises an unmapped Fastify content-type error", async () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/auth/login",
@@ -333,12 +89,17 @@ describe("error handling", () => {
       payload: "email=a@example.com&password=secretsecret",
     })
     expect(response.statusCode).toBe(500)
-    expect(response.json().error.code).toBe("INTERNAL_ERROR")
-    // Fastify's raw message must not leak into the public envelope.
-    expect(JSON.stringify(response.json())).not.toContain("Unsupported Media")
+    expect(response.json()).toMatchObject({
+      data: null,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "An unexpected error occurred",
+      },
+    })
+    expect(response.body).not.toContain("Unsupported Media")
   })
 
-  it("does not set no-store on non-auth pre-route failures", async () => {
+  it("leaves the cache-control header unset on non-auth JSON parse failures", async () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/data/items",
@@ -352,12 +113,12 @@ describe("error handling", () => {
     expect(response.headers["cache-control"]).toBeUndefined()
   })
 
-  it("returns 404 envelope for unknown routes", async () => {
-    const response = await app.inject({
-      method: "GET",
-      url: "/v1/unknown",
-    })
+  it("returns the public 404 envelope for an unregistered route", async () => {
+    const response = await app.inject({ method: "GET", url: "/v1/unknown" })
     expect(response.statusCode).toBe(404)
-    expect(response.json().error.code).toBe("TABLE_NOT_FOUND")
+    expect(response.json()).toMatchObject({
+      data: null,
+      error: { code: "TABLE_NOT_FOUND" },
+    })
   })
 })

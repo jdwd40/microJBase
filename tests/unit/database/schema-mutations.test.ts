@@ -26,6 +26,7 @@ import type {
 
 const APP_SCHEMA = "app"
 const ADMIN_ROLE = "mjb_admin"
+const notesTarget = { actor: "operator", schema: APP_SCHEMA, table: "notes" }
 
 const TEXT_COLUMN_SPEC: ManagedColumnSpec = {
   name: "title",
@@ -258,9 +259,7 @@ describe("createTable", () => {
     const { service, calls } = makeService({ catalogue: catalogue([]) })
     const outcome = await service.createTable({
       idempotencyKey: "k1",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       columns: [
         {
           name: "title",
@@ -297,9 +296,7 @@ describe("createTable", () => {
     const { service, calls } = makeService({ catalogue: catalogue([]) })
     await service.createTable({
       idempotencyKey: "k-dry",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       columns: [
         {
           name: "title",
@@ -324,14 +321,7 @@ describe("createTable", () => {
         actor: "operator",
         schema: "microjbase",
         table: "notes",
-        columns: [
-          {
-            name: "title",
-            type: "text",
-            nullable: true,
-            default: { kind: "none" },
-          },
-        ],
+        columns: [{ ...TEXT_COLUMN_SPEC, nullable: true }],
       }),
     )
     expect(internal).toMatchObject({ code: "VALIDATION_ERROR", status: 400 })
@@ -342,14 +332,7 @@ describe("createTable", () => {
         actor: "operator",
         schema: "PG_catalog",
         table: "notes",
-        columns: [
-          {
-            name: "title",
-            type: "text",
-            nullable: true,
-            default: { kind: "none" },
-          },
-        ],
+        columns: [{ ...TEXT_COLUMN_SPEC, nullable: true }],
       }),
     )
     expect(caseVariant).toMatchObject({ code: "VALIDATION_ERROR", status: 400 })
@@ -360,14 +343,7 @@ describe("createTable", () => {
         actor: "operator",
         schema: "missing",
         table: "notes",
-        columns: [
-          {
-            name: "title",
-            type: "text",
-            nullable: true,
-            default: { kind: "none" },
-          },
-        ],
+        columns: [{ ...TEXT_COLUMN_SPEC, nullable: true }],
       }),
     )
     expect(missing).toMatchObject({ code: "TABLE_NOT_FOUND", status: 404 })
@@ -375,17 +351,8 @@ describe("createTable", () => {
     const existing = await rejection(
       service.createTable({
         idempotencyKey: "k4",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
-        columns: [
-          {
-            name: "title",
-            type: "text",
-            nullable: true,
-            default: { kind: "none" },
-          },
-        ],
+        ...notesTarget,
+        columns: [{ ...TEXT_COLUMN_SPEC, nullable: true }],
       }),
     )
     expect(existing).toMatchObject({ code: "CONFLICT", status: 409 })
@@ -401,14 +368,7 @@ describe("createTable", () => {
         actor: "operator",
         schema: APP_SCHEMA,
         table: "pg_stat_notes",
-        columns: [
-          {
-            name: "title",
-            type: "text",
-            nullable: true,
-            default: { kind: "none" },
-          },
-        ],
+        columns: [{ ...TEXT_COLUMN_SPEC, nullable: true }],
       }),
     )
     expect(reserved).toMatchObject({ code: "VALIDATION_ERROR", status: 400 })
@@ -416,9 +376,7 @@ describe("createTable", () => {
     const empty = await rejection(
       service.createTable({
         idempotencyKey: "k6",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         columns: [],
       }),
     )
@@ -428,9 +386,7 @@ describe("createTable", () => {
       const idColumn = await rejection(
         service.createTable({
           idempotencyKey: `k7-${name}`,
-          actor: "operator",
-          schema: APP_SCHEMA,
-          table: "notes",
+          ...notesTarget,
           columns: [
             { name, type: "text", nullable: true, default: { kind: "none" } },
           ],
@@ -442,9 +398,7 @@ describe("createTable", () => {
     const hostile = await rejection(
       service.createTable({
         idempotencyKey: "k8",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         columns: [
           {
             name: 'title"; DROP TABLE users; --',
@@ -498,9 +452,7 @@ describe("replay-first preflight bypass", () => {
     })
     const outcome = await service.createTable({
       idempotencyKey: "replay-key",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       columns: [TEXT_COLUMN_SPEC],
     })
     expect(outcome.replayed).toBe(false)
@@ -515,9 +467,7 @@ describe("replay-first preflight bypass", () => {
     })
     await service.dropTable({
       idempotencyKey: "replay-key",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       confirm: "not-the-right-value",
     })
     expect(calls).toHaveLength(1)
@@ -532,9 +482,7 @@ describe("renameTable", () => {
     })
     await service.renameTable({
       idempotencyKey: "r1",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       newName: "documents",
     })
     const call = calls[0]
@@ -573,9 +521,7 @@ describe("renameTable", () => {
     const exposed = await rejection(
       service.renameTable({
         idempotencyKey: "r3",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         newName: "notes2",
       }),
     )
@@ -595,9 +541,7 @@ describe("renameTable", () => {
     const collision = await rejection(
       service.renameTable({
         idempotencyKey: "r5",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         newName: "documents",
       }),
     )
@@ -613,9 +557,7 @@ describe("dropTable", () => {
     })
     await service.dropTable({
       idempotencyKey: "d1",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       confirm: "app.notes",
     })
     const call = calls[0]
@@ -638,9 +580,7 @@ describe("dropTable", () => {
       const error = await rejection(
         service.dropTable({
           idempotencyKey: `d2-${confirm}`,
-          actor: "operator",
-          schema: APP_SCHEMA,
-          table: "notes",
+          ...notesTarget,
           confirm,
         }),
       )
@@ -700,9 +640,7 @@ describe("addColumn", () => {
     })
     await service.addColumn({
       idempotencyKey: "a1",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       column: {
         name: "priority",
         type: "integer",
@@ -727,9 +665,7 @@ describe("addColumn", () => {
     const duplicate = await rejection(
       service.addColumn({
         idempotencyKey: "a2",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         column: {
           name: "title",
           type: "text",
@@ -743,9 +679,7 @@ describe("addColumn", () => {
     const idColumn = await rejection(
       service.addColumn({
         idempotencyKey: "a3",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         column: {
           name: "id",
           type: "text",
@@ -759,9 +693,7 @@ describe("addColumn", () => {
     const notNullNoDefault = await rejection(
       service.addColumn({
         idempotencyKey: "a4",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         column: {
           name: "priority",
           type: "integer",
@@ -783,9 +715,7 @@ describe("addColumn", () => {
     })
     await service.addColumn({
       idempotencyKey: "a5",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       column: {
         name: "priority",
         type: "integer",
@@ -813,9 +743,7 @@ describe("renameColumn", () => {
     const { service, calls } = makeService({ catalogue: guardedCatalogue })
     await service.renameColumn({
       idempotencyKey: "rc1",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       column: "title",
       newName: "heading",
     })
@@ -836,9 +764,7 @@ describe("renameColumn", () => {
       const error = await rejection(
         service.renameColumn({
           idempotencyKey: `rc2-${key}`,
-          actor: "operator",
-          schema: APP_SCHEMA,
-          table: "notes",
+          ...notesTarget,
           column: columnName,
           newName: "heading",
         }),
@@ -849,9 +775,7 @@ describe("renameColumn", () => {
     const idTarget = await rejection(
       service.renameColumn({
         idempotencyKey: "rc3",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         column: "title",
         newName: "id",
       }),
@@ -877,9 +801,7 @@ describe("dropColumn", () => {
     })
     await service.dropColumn({
       idempotencyKey: "dc1",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       column: "title",
       confirm: "app.notes.title",
     })
@@ -896,9 +818,7 @@ describe("dropColumn", () => {
     const error = await rejection(
       service.dropColumn({
         idempotencyKey: "dc2",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         column: "title",
         confirm: "title",
       }),
@@ -929,9 +849,7 @@ describe("dropColumn", () => {
       const error = await rejection(
         service.dropColumn({
           idempotencyKey: `dc3-${key}`,
-          actor: "operator",
-          schema: APP_SCHEMA,
-          table: "notes",
+          ...notesTarget,
           column: columnName,
           confirm: `app.notes.${columnName}`,
         }),
@@ -959,9 +877,7 @@ describe("column defaults, nullability, and type changes", () => {
     })
     await service.setColumnDefault({
       idempotencyKey: "sd1",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       column: "title",
       default: { kind: "literal", value: "untitled" },
     })
@@ -984,9 +900,7 @@ describe("column defaults, nullability, and type changes", () => {
     const generated = await rejection(
       service.setColumnDefault({
         idempotencyKey: "sd2",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         column: "computed",
         default: { kind: "literal", value: 1 },
       }),
@@ -996,9 +910,7 @@ describe("column defaults, nullability, and type changes", () => {
     const unmanageable = await rejection(
       service.setColumnDefault({
         idempotencyKey: "sd3",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         column: "amount",
         default: { kind: "literal", value: 1 },
       }),
@@ -1011,9 +923,7 @@ describe("column defaults, nullability, and type changes", () => {
     const mismatched = await rejection(
       service.setColumnDefault({
         idempotencyKey: "sd4",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         column: "body",
         default: { kind: "random_uuid" },
       }),
@@ -1034,9 +944,7 @@ describe("column defaults, nullability, and type changes", () => {
 
     await service.dropColumnDefault({
       idempotencyKey: "dd1",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       column: "title",
     })
     expect(calls[0]?.options.commandType).toBe("schema.column.default.drop")
@@ -1044,9 +952,7 @@ describe("column defaults, nullability, and type changes", () => {
     const hasNulls = await rejection(
       service.setColumnNotNull({
         idempotencyKey: "nn1",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         column: "title",
       }),
     )
@@ -1054,9 +960,7 @@ describe("column defaults, nullability, and type changes", () => {
 
     await service.dropColumnNotNull({
       idempotencyKey: "nn2",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       column: "title",
     })
     expect(calls[1]?.options.commandType).toBe("schema.column.not_null.drop")
@@ -1071,9 +975,7 @@ describe("column defaults, nullability, and type changes", () => {
     })
     await service.setColumnNotNull({
       idempotencyKey: "nn3",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       column: "title",
     })
     expect(expectGuarded(statementsOf(calls[0]))).toEqual([
@@ -1090,9 +992,7 @@ describe("column defaults, nullability, and type changes", () => {
     })
     await service.changeColumnType({
       idempotencyKey: "ct1",
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       column: "priority",
       toType: "bigint",
     })
@@ -1129,9 +1029,7 @@ describe("column defaults, nullability, and type changes", () => {
     const withDefault = await rejection(
       service.changeColumnType({
         idempotencyKey: "ct2",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         column: "priority",
         toType: "bigint",
       }),
@@ -1141,9 +1039,7 @@ describe("column defaults, nullability, and type changes", () => {
     const outsideMatrix = await rejection(
       service.changeColumnType({
         idempotencyKey: "ct3",
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         column: "plain",
         toType: "uuid",
       }),
@@ -1178,9 +1074,7 @@ describe("safeguarded default commands", () => {
       const error = await rejection(
         service.setColumnDefault({
           idempotencyKey: `sd-${key}`,
-          actor: "operator",
-          schema: APP_SCHEMA,
-          table: "notes",
+          ...notesTarget,
           column: columnName,
           default: { kind: "literal", value: 1 },
         }),
@@ -1200,9 +1094,7 @@ describe("safeguarded default commands", () => {
       const error = await rejection(
         service.dropColumnDefault({
           idempotencyKey: `dd-${key}`,
-          actor: "operator",
-          schema: APP_SCHEMA,
-          table: "notes",
+          ...notesTarget,
           column: columnName,
         }),
       )
@@ -1274,9 +1166,7 @@ describe("replay reconstructs the compiled statement from the recorded command",
 
     const outcome = await service.changeColumnType({
       idempotencyKey: key,
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       column: "priority",
       toType: "bigint",
     })
@@ -1325,9 +1215,7 @@ describe("replay reconstructs the compiled statement from the recorded command",
 
     await service.setColumnDefault({
       idempotencyKey: key,
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       column: "due_on",
       default: { kind: "literal", value: "2026-01-01" },
     })
@@ -1364,9 +1252,7 @@ describe("replay reconstructs the compiled statement from the recorded command",
 
     await service.setColumnDefault({
       idempotencyKey: key,
-      actor: "operator",
-      schema: APP_SCHEMA,
-      table: "notes",
+      ...notesTarget,
       column: "due_on",
       default: { kind: "literal", value: "2026-01-01" },
     })
@@ -1390,9 +1276,7 @@ describe("replay reconstructs the compiled statement from the recorded command",
     const error = await rejection(
       service.setColumnDefault({
         idempotencyKey: key,
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         column: "title",
         default: { kind: "literal", value: "untitled" },
       }),
@@ -1441,9 +1325,7 @@ describe("dry-run always runs the preflight guards", () => {
     const error = await rejection(
       service.dropTable({
         idempotencyKey: key,
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         confirm: "nope",
         dryRun: true,
       }),
@@ -1462,9 +1344,7 @@ describe("dry-run always runs the preflight guards", () => {
     const error = await rejection(
       service.dropTable({
         idempotencyKey: key,
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         confirm: "nope",
         dryRun: true,
       }),
@@ -1484,9 +1364,7 @@ describe("dry-run always runs the preflight guards", () => {
     const error = await rejection(
       service.dropColumn({
         idempotencyKey: key,
-        actor: "operator",
-        schema: APP_SCHEMA,
-        table: "notes",
+        ...notesTarget,
         column: "title",
         confirm: "nope",
         dryRun: true,
