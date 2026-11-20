@@ -47,6 +47,7 @@ const APPLIED_MIGRATIONS = [
   "0005_schema_operations.sql",
   "0006_exposure_registry.sql",
   "0007_exposure_registry_revoke_public.sql",
+  "0008_application_registry.sql",
 ] as const
 
 async function withAdminClient<T>(fn: (client: pg.Client) => Promise<T>) {
@@ -140,6 +141,43 @@ describe("schema snapshot (real PostgreSQL)", () => {
         /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/,
       )
     }
+  })
+
+  it("keeps new applications disabled and private, with aliases local to one app", async () => {
+    await withAdminClient(async (client) => {
+      await client.query("BEGIN")
+      try {
+        const apps = await client.query<{
+          id: string
+          enabled: boolean
+          open_to_authenticated: boolean
+        }>(
+          "INSERT INTO microjbase.applications (name, schema_name) VALUES ('A','scope_a'), ('B','scope_b') RETURNING id, enabled, open_to_authenticated",
+        )
+        for (const app of apps.rows) {
+          expect(app).toMatchObject({
+            enabled: false,
+            open_to_authenticated: false,
+          })
+          await client.query(
+            "INSERT INTO microjbase.application_exposures (app_id, alias, table_name) VALUES ($1, 'items', 'items')",
+            [app.id],
+          )
+        }
+        const access = await client.query<{ writable: boolean }>(
+          "SELECT has_table_privilege($1, 'microjbase.application_memberships', 'INSERT') AS writable",
+          [runtimeRoleName],
+        )
+        expect(access.rows[0]?.writable).toBe(false)
+        await expect(
+          client.query(
+            "INSERT INTO microjbase.applications(name,schema_name) VALUES ('C','scope_a')",
+          ),
+        ).rejects.toMatchObject({ code: "23505" })
+      } finally {
+        await client.query("ROLLBACK")
+      }
+    })
   })
 
   it("renders applied_at identically regardless of the session timezone", async () => {
