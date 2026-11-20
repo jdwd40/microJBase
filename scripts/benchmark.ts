@@ -389,6 +389,57 @@ async function runWorkload(
   }
 }
 
+async function measureCrud(baseUrl: string, token: string) {
+  const headers = {
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+  }
+  const started = performance.now()
+  let requests = 0
+  async function worker(workerId: number) {
+    for (let cycle = 0; cycle < 10; cycle++) {
+      const route = baseUrl + "/v1/data/todos"
+      const title = `worker-${workerId}-${cycle}`
+      async function request(
+        method: string,
+        url: string,
+        status: number,
+        body?: object,
+      ) {
+        const response = await fetch(url, {
+          method,
+          headers: body ? headers : { authorization: headers.authorization },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        })
+        const content = await response.text()
+        if (response.status !== status)
+          throw new Error(`${method} for ${title} returned ${response.status}`)
+        requests++
+        return content
+      }
+      const created = JSON.parse(await request("POST", route, 201, { title }))
+      const row = route + "/" + created.data.id
+      if (JSON.parse(await request("GET", row, 200)).data.title !== title)
+        throw new Error("Unexpected stored title")
+      if (
+        !JSON.parse(await request("PATCH", row, 200, { completed: true })).data
+          .completed
+      )
+        throw new Error("Update was not applied")
+      await request("DELETE", row, 204)
+    }
+  }
+  await Promise.all(Array.from({ length: 20 }, (_, i) => worker(i)))
+  const durationMs = performance.now() - started
+  return {
+    clients: 20,
+    requests,
+    durationMs,
+    requestsPerSecond: (requests * 1000) / durationMs,
+  }
+}
+
 async function main(): Promise<void> {
   assertBuildFresh()
   console.log("Provisioning benchmark database...")
@@ -416,6 +467,7 @@ async function main(): Promise<void> {
     const app = await startApp()
     let rssIdleMiB = 0
     let rssAfterWorkloadMiB = 0
+    let crud
     let workload: WorkloadResult | null = null
     try {
       await waitForHealth(app, HEALTH_TIMEOUT_MS)
@@ -458,6 +510,7 @@ async function main(): Promise<void> {
 
       workload = await runWorkload(app.baseUrl, token)
       rssAfterWorkloadMiB = rssMiB(app.pid)
+      crud = await measureCrud(app.baseUrl, token)
     } finally {
       await stopApp(app)
     }
@@ -481,6 +534,7 @@ async function main(): Promise<void> {
         note: "PostgreSQL memory is a separate OS process and is not included.",
       },
       workload,
+      crud,
     }
 
     console.log("\n===== BENCHMARK RESULT (JSON) =====")
